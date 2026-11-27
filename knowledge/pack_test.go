@@ -233,28 +233,54 @@ func TestManifestValidate(t *testing.T) {
 	}
 	hash := strings.Repeat("a", 64)
 	for name, m := range map[string]*Manifest{
-		"no format":       mk(func(m *Manifest) { m.Format = 0 }),
-		"newer format":    mk(func(m *Manifest) { m.Format = FormatVersion + 1 }),
-		"no kind":         mk(func(m *Manifest) { m.Kind = "" }),
-		"tool pack":       mk(func(m *Manifest) { m.Kind = "tools" }),
-		"no id":           mk(func(m *Manifest) { m.PackID = "" }),
-		"dot id":          mk(func(m *Manifest) { m.PackID = "." }),
-		"dotdot id":       mk(func(m *Manifest) { m.PackID = ".." }),
-		"traversal id":    mk(func(m *Manifest) { m.PackID = "../../keys" }),
-		"slash id":        mk(func(m *Manifest) { m.PackID = "a/b" }),
-		"hidden id":       mk(func(m *Manifest) { m.PackID = ".staging" }),
-		"long id":         mk(func(m *Manifest) { m.PackID = strings.Repeat("a", 65) }),
-		"no version":      mk(func(m *Manifest) { m.Version = "" }),
-		"traversal ver":   mk(func(m *Manifest) { m.Version = "../1" }),
-		"no key":          mk(func(m *Manifest) { m.KeyID = "" }),
-		"delta base":      mk(func(m *Manifest) { m.BaseVersion = "0.9" }),
-		"delta deletions": mk(func(m *Manifest) { m.Deletions = []string{"docs/x.md"} }),
-		"bad hash":        mk(func(m *Manifest) { m.Files = []FileEntry{{Path: "a", Size: 1, SHA256: "xyz"}} }),
-		"traversal":       mk(func(m *Manifest) { m.Files = []FileEntry{{Path: "../a", Size: 1, SHA256: hash}} }),
-		"reserved":        mk(func(m *Manifest) { m.Files = []FileEntry{{Path: ManifestName, Size: 1, SHA256: hash}} }),
+		"no format":              mk(func(m *Manifest) { m.Format = 0 }),
+		"newer format":           mk(func(m *Manifest) { m.Format = FormatVersion + 1 }),
+		"no kind":                mk(func(m *Manifest) { m.Kind = "" }),
+		"tool pack":              mk(func(m *Manifest) { m.Kind = "tools" }),
+		"no id":                  mk(func(m *Manifest) { m.PackID = "" }),
+		"dot id":                 mk(func(m *Manifest) { m.PackID = "." }),
+		"dotdot id":              mk(func(m *Manifest) { m.PackID = ".." }),
+		"traversal id":           mk(func(m *Manifest) { m.PackID = "../../keys" }),
+		"slash id":               mk(func(m *Manifest) { m.PackID = "a/b" }),
+		"hidden id":              mk(func(m *Manifest) { m.PackID = ".staging" }),
+		"long id":                mk(func(m *Manifest) { m.PackID = strings.Repeat("a", 65) }),
+		"no version":             mk(func(m *Manifest) { m.Version = "" }),
+		"traversal ver":          mk(func(m *Manifest) { m.Version = "../1" }),
+		"no key":                 mk(func(m *Manifest) { m.KeyID = "" }),
+		"delta base not older":   mk(func(m *Manifest) { m.BaseVersion = "2" }),
+		"delta base same":        mk(func(m *Manifest) { m.BaseVersion = "1" }),
+		"delta base traversal":   mk(func(m *Manifest) { m.BaseVersion = "../0" }),
+		"deletions without base": mk(func(m *Manifest) { m.Deletions = []string{"docs/x.md"} }),
+		"file and deletion":      mk(func(m *Manifest) { m.BaseVersion = "0.9"; m.Deletions = []string{"a/b.txt"} }),
+		"duplicate deletion":     mk(func(m *Manifest) { m.BaseVersion = "0.9"; m.Deletions = []string{"x", "x"} }),
+		"unsafe deletion":        mk(func(m *Manifest) { m.BaseVersion = "0.9"; m.Deletions = []string{"../x"} }),
+		"embedding not a file": mk(func(m *Manifest) {
+			m.Embeddings = []EmbeddingSet{{Path: "embeddings/m.akv", Model: "m", Dimension: 3, ChunkBytes: 4096}}
+		}),
+		"embedding outside dir": mk(func(m *Manifest) {
+			m.Embeddings = []EmbeddingSet{{Path: "a/b.txt", Model: "m", Dimension: 3, ChunkBytes: 4096}}
+		}),
+		"embedding bad dimension": mk(func(m *Manifest) {
+			m.Embeddings = []EmbeddingSet{{Path: "a/b.txt", Model: "m", Dimension: 0, ChunkBytes: 4096}}
+		}),
+		"bad hash":  mk(func(m *Manifest) { m.Files = []FileEntry{{Path: "a", Size: 1, SHA256: "xyz"}} }),
+		"traversal": mk(func(m *Manifest) { m.Files = []FileEntry{{Path: "../a", Size: 1, SHA256: hash}} }),
+		"reserved":  mk(func(m *Manifest) { m.Files = []FileEntry{{Path: ManifestName, Size: 1, SHA256: hash}} }),
 	} {
 		if err := m.Validate(); err == nil {
 			t.Errorf("%s: should be invalid", name)
+		}
+	}
+	// A well-formed delta and a declared embedding set are valid.
+	for name, m := range map[string]*Manifest{
+		"delta": mk(func(m *Manifest) { m.BaseVersion = "0.9"; m.Deletions = []string{"docs/old.md"} }),
+		"embeddings": mk(func(m *Manifest) {
+			m.Files = append(m.Files, FileEntry{Path: "embeddings/m-1.akv", Size: 10, SHA256: hash})
+			m.Embeddings = []EmbeddingSet{{Path: "embeddings/m-1.akv", Model: "m", Dimension: 768, ChunkBytes: 4096, Count: 1}}
+		}),
+	} {
+		if err := m.Validate(); err != nil {
+			t.Errorf("%s: should be valid: %v", name, err)
 		}
 	}
 	for _, ok := range []string{"artex-core", "a", "2026.11.27", "v1.2.3+build_4", "A-1"} {

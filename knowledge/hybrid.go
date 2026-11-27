@@ -267,6 +267,13 @@ func (s *Store) embedActivePack(ctx context.Context) error {
 	if err := dropStaleEmbeddings(ctx, s.db, s.embedder.Model()); err != nil {
 		return err
 	}
+	// Vectors shipped in the pack for this model and chunking come first: they
+	// cost no embedding call (embedfile.go).
+	if n, err := s.applyPrecomputed(ctx); err != nil {
+		log.Printf("[knowledge] precomputed vectors: %v (the rest is embedded locally)", err)
+	} else if n > 0 {
+		log.Printf("[knowledge] applied %d precomputed vectors from the pack", n)
+	}
 	schemaReady := false
 	total := 0
 	for {

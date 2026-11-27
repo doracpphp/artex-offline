@@ -31,7 +31,14 @@ type Config struct {
 	Dir           string // absolute; packs extract to <Dir>/<pack-id>/
 	MaxChunks     int
 	MaxChunkBytes int
+	// TemplatesDir is where this installation's nuclei-templates are
+	// (NUCLEI_TEMPLATES_DIR, which the image sets to its baked copy), so a
+	// template hit can name the local file nuclei can run. Empty: none.
+	TemplatesDir string
 }
+
+// TemplatesDirEnv is nuclei's own variable for its templates directory.
+const TemplatesDirEnv = "NUCLEI_TEMPLATES_DIR"
 
 // LoadConfig resolves the configuration from the environment. dataDir is the
 // server's data directory, used for the default pack location.
@@ -41,6 +48,7 @@ func LoadConfig(dataDir string) Config {
 		Dir:           strings.TrimSpace(os.Getenv(DirEnv)),
 		MaxChunks:     envInt(MaxChunksEnv, 8, 1, 50),
 		MaxChunkBytes: envInt(MaxChunkBytesEnv, 4096, 256, 1<<20),
+		TemplatesDir:  strings.TrimSpace(os.Getenv(TemplatesDirEnv)),
 	}
 	if c.Dir == "" {
 		c.Dir = filepath.Join(dataDir, "knowledge")

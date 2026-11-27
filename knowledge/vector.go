@@ -33,7 +33,7 @@ func VectorExtensionAvailable(ctx context.Context, db *sql.DB) bool {
 // (e.g. an external role without CREATE EXTENSION rights), falling back to
 // lexical search.
 func ensureVectorSchema(ctx context.Context, db *sql.DB, dim int, model string) error {
-	if dim <= 0 || dim > 2000 {
+	if dim <= 0 || dim > maxEmbeddingDim {
 		return fmt.Errorf("embedding dimension %d is out of pgvector's HNSW range (1..2000)", dim)
 	}
 	if _, err := db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {

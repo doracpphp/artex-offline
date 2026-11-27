@@ -158,6 +158,8 @@ func (s *Server) importKnowledgePack(w http.ResponseWriter, r *http.Request) {
 	opt := knowledge.ImportOptions{
 		AllowDowngrade: truthy(r.URL.Query().Get("allow_downgrade")),
 		Repin:          truthy(r.URL.Query().Get("repin")),
+		// nuclei-templates baked into the image, for the version check (docs §5).
+		ImageTemplatesVersion: agent.InstalledToolVersion("nuclei-templates"),
 	}
 	cfg := s.knowledge.Config()
 	inbox := filepath.Join(cfg.Dir, "inbox")
@@ -218,8 +220,15 @@ func (s *Server) importKnowledgePack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	knowledgeActive.Store(true)
-	log.Printf("[knowledge] imported pack %s %s (key %s, sha256 %s): %d exploits, %d CVEs, %d docs, %d templates (%d skipped)",
-		res.PackID, res.Version, res.KeyID, res.KeyFingerprint, res.Exploits, res.CVEs, res.Docs, res.Templates, res.Skipped)
+	kind := "full pack"
+	if res.BaseVersion != "" {
+		kind = "delta from " + res.BaseVersion
+	}
+	log.Printf("[knowledge] imported pack %s %s (%s; key %s, sha256 %s): %d exploits, %d CVEs, %d docs, %d templates (%d skipped), %d vectors reused",
+		res.PackID, res.Version, kind, res.KeyID, res.KeyFingerprint, res.Exploits, res.CVEs, res.Docs, res.Templates, res.Skipped, res.Carried)
+	for _, w := range res.Warnings {
+		log.Printf("[knowledge] WARNING: %s", w)
+	}
 	writeJSON(w, 200, res)
 }
 

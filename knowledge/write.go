@@ -23,6 +23,12 @@ type PackInput struct {
 	// Files maps an in-pack slash path (e.g. "exploitdb/files_exploits.csv") to
 	// the source file on disk.
 	Files map[string]string
+	// BaseVersion and Deletions make a delta pack (DeltaInput builds them).
+	BaseVersion string
+	Deletions   []string
+	// Embeddings declares precomputed vector files, each also one of Files
+	// (BuildEmbeddingFile writes them).
+	Embeddings []EmbeddingSet
 }
 
 // BuildPack writes a signed knowledge pack to out. It hashes and sizes every
@@ -59,6 +65,10 @@ func BuildPack(out io.Writer, in PackInput, priv ed25519.PrivateKey) error {
 		KeyID:   in.KeyID,
 		Sources: in.Sources,
 		Files:   files,
+
+		BaseVersion: in.BaseVersion,
+		Deletions:   in.Deletions,
+		Embeddings:  in.Embeddings,
 	}
 	if err := m.Validate(); err != nil {
 		return err

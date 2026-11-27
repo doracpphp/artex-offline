@@ -69,6 +69,40 @@ func (s *Store) ActivePack(ctx context.Context, packID string) (version string, 
 	return version, true, nil
 }
 
+// activePack is the active version of a pack id, as an import needs it.
+type activePack struct {
+	Version     string
+	Dir         string // kb_packs.dir, relative to the packs directory
+	ManifestSHA string // hash of the manifest.json stored in Dir
+}
+
+// activePackRow returns the active version of packID, if any.
+func (s *Store) activePackRow(ctx context.Context, packID string) (activePack, bool, error) {
+	var a activePack
+	err := s.db.QueryRowContext(ctx,
+		`SELECT version, dir, manifest_sha256 FROM kb_packs WHERE pack_id=$1 AND active`, packID).Scan(&a.Version, &a.Dir, &a.ManifestSHA)
+	if err == sql.ErrNoRows {
+		return activePack{}, false, nil
+	}
+	if err != nil {
+		return activePack{}, false, err
+	}
+	return a, true, nil
+}
+
+// documentChunks is how a document becomes chunks: its title and body,
+// sanitised, joined so a title-only query still matches, and cut at maxBytes.
+// The importer and the builder (precomputed vectors, keyed by chunk text) must
+// produce identical chunks, so both go through here.
+func documentChunks(title, body string, maxBytes int) []Chunk {
+	title, body = sanitizeText(title), sanitizeText(body)
+	text := title
+	if strings.TrimSpace(body) != "" {
+		text = title + "\n\n" + body
+	}
+	return ChunkText(text, maxBytes)
+}
+
 // HasActivePack reports whether any pack is active, so the tools can be omitted
 // when there is nothing to search.
 func (s *Store) HasActivePack(ctx context.Context) bool {
@@ -186,12 +220,16 @@ type indexer struct {
 // is unique): its old documents are deleted and the new ones inserted in the
 // same transaction, and the row points at the new directory only once it
 // commits.
-func (s *Store) beginImport(ctx context.Context, vm *VerifiedManifest, dir string) (*indexer, error) {
+//
+// vm is the verified pack (its key and fingerprint); m is the manifest the
+// directory is indexed from (the merged one for a delta), and manifestSHA the
+// hash of its stored bytes.
+func (s *Store) beginImport(ctx context.Context, vm *VerifiedManifest, m *Manifest, manifestSHA, dir string) (*indexer, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	sources := sanitizeJSON(mustJSON(vm.Sources))
+	sources := sanitizeJSON(mustJSON(m.Sources))
 	var pk int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO kb_packs(pack_id, version, key_id, key_fingerprint, manifest_sha256, sources, file_count, dir, active)
@@ -201,7 +239,7 @@ func (s *Store) beginImport(ctx context.Context, vm *VerifiedManifest, dir strin
 		   manifest_sha256=EXCLUDED.manifest_sha256, sources=EXCLUDED.sources,
 		   file_count=EXCLUDED.file_count, dir=EXCLUDED.dir, imported_at=NOW()
 		 RETURNING id`,
-		vm.PackID, vm.Version, vm.KeyID, vm.Fingerprint, sha256Hex(vm.Raw), sources, len(vm.Files), dir).Scan(&pk)
+		vm.PackID, vm.Version, vm.KeyID, vm.Fingerprint, manifestSHA, sources, len(m.Files), dir).Scan(&pk)
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("insert pack: %w", err)
@@ -236,11 +274,7 @@ func (ix *indexer) addDocument(kind, extID, sourcePath, title string, cveIDs, cp
 	if err != nil {
 		return 0, fmt.Errorf("insert document: %w", err)
 	}
-	indexText := title
-	if strings.TrimSpace(bodyText) != "" {
-		indexText = title + "\n\n" + bodyText
-	}
-	for _, c := range ChunkText(indexText, ix.cfg.MaxChunkBytes) {
+	for _, c := range documentChunks(title, bodyText, ix.cfg.MaxChunkBytes) {
 		if _, err := ix.tx.ExecContext(ix.ctx,
 			`INSERT INTO kb_chunks(document_id, chunk_index, body) VALUES ($1,$2,$3)`,
 			docID, c.Index, c.Text); err != nil {

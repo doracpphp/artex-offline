@@ -20,6 +20,7 @@ import (
 type ImportResult struct {
 	PackID         string `json:"pack_id"`
 	Version        string `json:"version"`
+	BaseVersion    string `json:"base_version,omitempty"` // set when the pack was a delta
 	KeyID          string `json:"key_id"`
 	KeyFingerprint string `json:"key_fingerprint"`
 	Exploits       int    `json:"exploits"`
@@ -27,6 +28,12 @@ type ImportResult struct {
 	Docs           int    `json:"docs"`
 	Templates      int    `json:"templates"`
 	Skipped        int    `json:"skipped"`
+	// Carried is how many chunk vectors were reused from the previous version
+	// (unchanged chunk text), so they need no new embedding.
+	Carried int `json:"carried_vectors,omitempty"`
+	// Warnings are non-fatal findings the operator should see (e.g. a
+	// nuclei-templates version that differs from the image's).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // maxExploitBodyBytes bounds how much of an exploit file is read into the index.
@@ -53,6 +60,10 @@ type ImportOptions struct {
 	// pack id at first import, and pins the new key. Without it such a pack is
 	// refused (key-swap protection, keys.go).
 	Repin bool
+	// ImageTemplatesVersion is the nuclei-templates version baked into this
+	// installation's image ("" when there is none, e.g. a native run). A pack
+	// with templates of another version imports with a warning (docs §5).
+	ImageTemplatesVersion string
 }
 
 // ErrImportBusy is returned when another import is running.
@@ -61,20 +72,22 @@ var ErrImportBusy = errors.New("another knowledge pack import is already running
 // stagingPrefix names in-progress extraction directories inside a pack root.
 const stagingPrefix = ".staging-"
 
-// Import verifies a pack file, extracts it into a new versioned directory,
-// indexes it, and activates it, so that a failure at any step leaves the
-// currently active pack — its index rows and its files — untouched (docs §4.1):
+// Import verifies a pack file, builds its new versioned directory, indexes it,
+// and activates it, so that a failure at any step leaves the currently active
+// pack — its index rows and its files — untouched (docs §4.1):
 //
 //  1. verify the signature against the trusted keys before the manifest is
-//     parsed, and check the pack id's key pin and the downgrade rule;
-//  2. extract to a fresh staging directory (unique per import) and index into
-//     an uncommitted transaction;
-//  3. rename staging to <packs>/<pack_id>/<version>-<hash>-<n>, a new name
-//     that nothing references yet;
+//     parsed, and check the pack id's key pin and the version rule (a full
+//     pack must not be a downgrade; a delta must apply to the active version);
+//  2. extract to a fresh staging directory (unique per import); for a delta,
+//     complete it with the base version's unchanged files (delta.go); store
+//     the manifest the directory was indexed from as manifest.json;
+//  3. index into an uncommitted transaction, then rename staging to
+//     <packs>/<pack_id>/<version>-<hash>-<n>, a name nothing references yet;
 //  4. commit: activate the new row, deactivate the old one and set the key pin,
 //     atomically;
-//  5. only then remove the superseded directories and the superseded rows'
-//     index data.
+//  5. reuse the old version's vectors for unchanged chunks, then remove the
+//     superseded directories and index rows.
 //
 // Imports are serialised (ErrImportBusy). keys is the trusted key set
 // (production: TrustedKeys).
@@ -91,11 +104,23 @@ func (s *Store) Import(ctx context.Context, packPath string, keys map[string]ed2
 	if err := s.checkKeyPin(ctx, vm, opt.Repin); err != nil {
 		return nil, err
 	}
-	// Downgrade protection: a validly signed old pack is still stale.
-	if active, ok, err := s.ActivePack(ctx, vm.PackID); err != nil {
+	active, hasActive, err := s.activePackRow(ctx, vm.PackID)
+	if err != nil {
 		return nil, err
-	} else if ok && CompareVersions(vm.Version, active) < 0 && !opt.AllowDowngrade {
-		return nil, fmt.Errorf("pack %s version %s is older than the active %s; re-import with downgrade allowed to override", vm.PackID, vm.Version, active)
+	}
+	if vm.BaseVersion != "" {
+		// A delta applies to exactly its base: anything else would merge it onto
+		// files it was not computed against.
+		if !hasActive || active.Version != vm.BaseVersion {
+			cur := "no active version"
+			if hasActive {
+				cur = "the active version is " + active.Version
+			}
+			return nil, fmt.Errorf("pack %s %s is a delta for base version %s, but %s; import the full pack of %s (or a delta built against the active version) first", vm.PackID, vm.Version, vm.BaseVersion, cur, vm.BaseVersion)
+		}
+	} else if hasActive && CompareVersions(vm.Version, active.Version) < 0 && !opt.AllowDowngrade {
+		// Downgrade protection: a validly signed old pack is still stale.
+		return nil, fmt.Errorf("pack %s version %s is older than the active %s; re-import with downgrade allowed to override", vm.PackID, vm.Version, active.Version)
 	}
 
 	// pack_id passed ValidID, so it is one safe path segment.
@@ -107,8 +132,7 @@ func (s *Store) Import(ctx context.Context, packPath string, keys map[string]ed2
 	if err != nil {
 		return nil, err
 	}
-	finalName := vm.Version + "-" + sha256Hex(vm.Raw)[:12] + "-" + strings.TrimPrefix(filepath.Base(staging), stagingPrefix)
-	final := filepath.Join(packRoot, finalName)
+	var final string
 	installed := false // staging renamed to final
 	committed := false
 	defer func() {
@@ -124,16 +148,45 @@ func (s *Store) Import(ctx context.Context, packPath string, keys map[string]ed2
 		return nil, err
 	}
 
-	ix, err := s.beginImport(ctx, vm, vm.PackID+"/"+finalName)
+	// The manifest this directory is indexed from: the signed one for a full
+	// pack, the merged one for a delta. It is stored with the files so a later
+	// delta can build on it, and its hash goes into kb_packs.
+	merged, manifestBytes := vm.Manifest, vm.Raw
+	if vm.BaseVersion != "" {
+		baseDir, err := s.cfg.packFilesDir(active.Dir)
+		if err != nil {
+			return nil, err
+		}
+		base, err := readStoredManifest(baseDir, active.ManifestSHA)
+		if err != nil {
+			return nil, err
+		}
+		if merged, err = applyDelta(baseDir, base, vm.Manifest, staging); err != nil {
+			return nil, err
+		}
+		if manifestBytes, err = merged.Marshal(); err != nil {
+			return nil, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(staging, storedManifestName), manifestBytes, 0o640); err != nil {
+		return nil, err
+	}
+	manifestSHA := sha256Hex(manifestBytes)
+	finalName := vm.Version + "-" + manifestSHA[:12] + "-" + strings.TrimPrefix(filepath.Base(staging), stagingPrefix)
+	final = filepath.Join(packRoot, finalName)
+
+	ix, err := s.beginImport(ctx, vm, merged, manifestSHA, vm.PackID+"/"+finalName)
 	if err != nil {
 		return nil, err
 	}
-	res, err := indexPack(ix, vm.Manifest, staging)
+	res, err := indexPack(ix, viewOf(merged, staging))
 	if err != nil {
 		ix.rollback()
 		return nil, err
 	}
+	res.PackID, res.Version, res.BaseVersion = vm.PackID, vm.Version, vm.BaseVersion
 	res.KeyID, res.KeyFingerprint = vm.KeyID, vm.Fingerprint
+	res.Warnings = templateWarnings(merged, opt.ImageTemplatesVersion, res.Templates)
 	// The new directory gets a name no row references yet, so the active pack's
 	// files are untouched until the commit switches the active row to it.
 	if err := os.Rename(staging, final); err != nil {
@@ -146,13 +199,50 @@ func (s *Store) Import(ctx context.Context, packPath string, keys map[string]ed2
 	}
 	committed = true
 
-	// Superseded data: best effort, after the switch. A failure only leaves
-	// unused files or rows behind; the next import retries.
+	// Vectors of unchanged chunks are reused before the old version's rows go;
+	// both steps are best effort (a failure costs re-embedding or leaves unused
+	// rows behind, which the next import retries).
+	res.Carried = s.carryOverEmbeddings(ctx, vm.PackID)
 	s.pruneSuperseded(ctx, vm.PackID, packRoot, finalName)
-	// Build the vector index in the background (no-op without an embedder or
-	// pgvector); search stays lexical until the vectors land.
+	// Build the remaining vectors in the background (no-op without an embedder or
+	// pgvector): precomputed vectors shipped in the pack first, then the
+	// embedding model. Search stays lexical until vectors land.
 	s.embedPackAsync(vm.PackID)
 	return res, nil
+}
+
+// templateWarnings compares the nuclei-templates version recorded in the pack
+// with the one baked into the image (docs §5): search results point at
+// templates by path, and only the image's own set can run them.
+func templateWarnings(m *Manifest, imageVersion string, templates int) []string {
+	if templates == 0 {
+		return nil
+	}
+	packVersion := ""
+	for _, src := range m.Sources {
+		if src.Name == "nuclei-templates" {
+			packVersion = strings.TrimSpace(src.Version)
+		}
+	}
+	imageVersion = templatesTag(imageVersion)
+	switch {
+	case imageVersion == "":
+		return []string{"this installation has no baked nuclei-templates (no tool inventory entry): template hits carry no local_path to run"}
+	case packVersion == "":
+		return []string{fmt.Sprintf("the pack does not record its nuclei-templates version; the image has %s, so a template hit may name a template the local nuclei does not have (local_path is given only when the file exists)", imageVersion)}
+	case templatesTag(packVersion) != imageVersion:
+		return []string{fmt.Sprintf("the pack's nuclei-templates %s differ from the image's %s: a template hit may name a template the local nuclei does not have, or a different revision of it (local_path is given only when the file exists)", packVersion, imageVersion)}
+	}
+	return nil
+}
+
+// templatesTag is the release tag of a templates version string: the tool
+// inventory records "v10.5.1 (<commit>)".
+func templatesTag(v string) string {
+	if f := strings.Fields(v); len(f) > 0 {
+		return f[0]
+	}
+	return ""
 }
 
 // pruneSuperseded removes, after a successful activation, every entry in
@@ -180,24 +270,59 @@ DELETE FROM kb_documents WHERE pack_id IN (SELECT id FROM kb_packs WHERE pack_id
 	}
 }
 
-// indexPack reads an extracted pack's data files and populates the index through
-// ix. Files are visited in sorted path order (CVEs, then exploits, then
-// docs/templates), so a re-import inserts the same documents in the same order.
-func indexPack(ix *indexer, m *Manifest, dir string) (*ImportResult, error) {
-	res := &ImportResult{PackID: m.PackID, Version: m.Version}
+// docSink receives the documents of a pack as they are parsed: the import's
+// database indexer, or the builder's chunk collector (embedfile.go), so both
+// see exactly the same documents and chunks.
+type docSink interface {
+	addDocument(kind, extID, sourcePath, title string, cveIDs, cpeTags []string, meta any, bodyText string) (int64, error)
+	addCPEMatch(docID int64, m CPEMatch) error
+}
+
+// packView is a pack's file set: its sorted paths and where each file is on
+// disk (the extracted directory on import, the source files in the builder).
+type packView struct {
+	paths   []string
+	has     map[string]bool
+	resolve func(packPath string) string
+}
+
+// viewOf is the view of an extracted pack directory with manifest m.
+func viewOf(m *Manifest, dir string) packView {
 	files := m.fileByPath()
-	paths := make([]string, 0, len(files))
+	v := packView{has: make(map[string]bool, len(files)), resolve: func(p string) string {
+		return filepath.Join(dir, filepath.FromSlash(p))
+	}}
 	for p := range files {
-		paths = append(paths, p)
+		v.paths = append(v.paths, p)
+		v.has[p] = true
 	}
-	sort.Strings(paths)
+	sort.Strings(v.paths)
+	return v
+}
+
+// viewOfFiles is the view of a builder input (pack path -> source file).
+func viewOfFiles(files map[string]string) packView {
+	v := packView{has: make(map[string]bool, len(files)), resolve: func(p string) string { return files[p] }}
+	for p := range files {
+		v.paths = append(v.paths, p)
+		v.has[p] = true
+	}
+	sort.Strings(v.paths)
+	return v
+}
+
+// indexPack reads a pack's data files and feeds them to ix. Files are visited
+// in sorted path order (CVEs, then exploits, then docs/templates), so a
+// re-import inserts the same documents in the same order.
+func indexPack(ix docSink, v packView) (*ImportResult, error) {
+	res := &ImportResult{}
 
 	// NVD: every file under nvd/ ending in .json is an NVD 2.0 snapshot.
-	for _, p := range paths {
+	for _, p := range v.paths {
 		if !strings.HasPrefix(p, "nvd/") || !strings.HasSuffix(p, ".json") {
 			continue
 		}
-		n, err := indexNVDFile(ix, filepath.Join(dir, filepath.FromSlash(p)))
+		n, err := indexNVDFile(ix, v.resolve(p))
 		if err != nil {
 			return nil, fmt.Errorf("index %s: %w", p, err)
 		}
@@ -205,8 +330,8 @@ func indexPack(ix *indexer, m *Manifest, dir string) (*ImportResult, error) {
 	}
 
 	// ExploitDB: the CSV index, with each exploit's file body chunked when present.
-	if _, ok := files[exploitDBCSV]; ok {
-		n, skipped, err := indexExploitDB(ix, dir, files)
+	if v.has[exploitDBCSV] {
+		n, skipped, err := indexExploitDB(ix, v)
 		if err != nil {
 			return nil, fmt.Errorf("index exploitdb: %w", err)
 		}
@@ -214,15 +339,15 @@ func indexPack(ix *indexer, m *Manifest, dir string) (*ImportResult, error) {
 	}
 
 	// Technique docs and templates: every file under docs/ or templates/.
-	for _, p := range paths {
+	for _, p := range v.paths {
 		switch {
 		case strings.HasPrefix(p, "docs/"):
-			if err := indexTextFile(ix, "doc", dir, p); err != nil {
+			if err := indexTextFile(ix, "doc", v.resolve(p), p); err != nil {
 				return nil, fmt.Errorf("index %s: %w", p, err)
 			}
 			res.Docs++
-		case strings.HasPrefix(p, "templates/"):
-			if err := indexTextFile(ix, "template", dir, p); err != nil {
+		case strings.HasPrefix(p, templatesPrefix):
+			if err := indexTemplateFile(ix, v.resolve(p), p); err != nil {
 				return nil, fmt.Errorf("index %s: %w", p, err)
 			}
 			res.Templates++
@@ -233,7 +358,7 @@ func indexPack(ix *indexer, m *Manifest, dir string) (*ImportResult, error) {
 
 // indexNVDFile streams one NVD file into the index: a cve document plus its CPE
 // applicability rows.
-func indexNVDFile(ix *indexer, path string) (int, error) {
+func indexNVDFile(ix docSink, path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -268,8 +393,8 @@ func indexNVDFile(ix *indexer, path string) (int, error) {
 // to the ExploitDB root (exploits/linux/remote/42.c), so the pack path is
 // exploitdb/ + that; an exploit whose file is not in the pack (or whose path is
 // unsafe) is indexed on its metadata alone, with no source path.
-func indexExploitDB(ix *indexer, dir string, files map[string]FileEntry) (indexed, skipped int, err error) {
-	f, err := os.Open(filepath.Join(dir, filepath.FromSlash(exploitDBCSV)))
+func indexExploitDB(ix docSink, v packView) (indexed, skipped int, err error) {
+	f, err := os.Open(v.resolve(exploitDBCSV))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -280,11 +405,9 @@ func indexExploitDB(ix *indexer, dir string, files map[string]FileEntry) (indexe
 	}
 	for _, ex := range exploits {
 		sourcePath, body := "", ""
-		if clean, perr := SafePath(ex.File); perr == nil {
-			if _, inPack := files[exploitDBPrefix+clean]; inPack {
-				sourcePath = exploitDBPrefix + clean
-				body = readBodyFile(filepath.Join(dir, filepath.FromSlash(sourcePath)), maxExploitBodyBytes)
-			}
+		if clean, perr := SafePath(ex.File); perr == nil && v.has[exploitDBPrefix+clean] {
+			sourcePath = exploitDBPrefix + clean
+			body = readBodyFile(v.resolve(sourcePath), maxExploitBodyBytes)
 		}
 		em := exploitMeta{
 			Type: ex.Type, Platform: ex.Platform, Date: ex.DatePub,
@@ -298,12 +421,40 @@ func indexExploitDB(ix *indexer, dir string, files map[string]FileEntry) (indexe
 	return indexed, skip, nil
 }
 
-// indexTextFile indexes a technique doc or template: the file content chunked,
-// with the title taken from the first markdown heading or the file name.
-func indexTextFile(ix *indexer, kind, dir, p string) error {
-	body := readBodyFile(filepath.Join(dir, filepath.FromSlash(p)), maxDocBytes)
+// indexTextFile indexes a technique doc: the file content chunked, with the
+// title taken from the first markdown heading or the file name.
+func indexTextFile(ix docSink, kind, file, p string) error {
+	body := readBodyFile(file, maxDocBytes)
 	title := docTitle(p, body)
 	_, err := ix.addDocument(kind, "", p, title, nil, nil, nil, body)
+	return err
+}
+
+// indexTemplateFile indexes a file under templates/. A nuclei template (YAML
+// with an id) gets its id as ext_id, its name as title, its CVEs (so lookup_cve
+// links it) and vendor:product, and severity/tags in meta; anything else in the
+// templates tree (helpers, payload lists) is indexed as plain text.
+func indexTemplateFile(ix docSink, file, p string) error {
+	body := readBodyFile(file, maxDocBytes)
+	ext := strings.ToLower(filepath.Ext(p))
+	t, ok := NucleiTemplate{}, false
+	if ext == ".yaml" || ext == ".yml" {
+		t, ok = ParseNucleiTemplate([]byte(body))
+	}
+	if !ok {
+		_, err := ix.addDocument("template", "", p, docTitle(p, body), nil, nil, nil, body)
+		return err
+	}
+	title := t.Name
+	if title == "" {
+		title = t.ID
+	}
+	var cpeTags []string
+	if t.Vendor != "" && t.Product != "" {
+		cpeTags = []string{t.Vendor + ":" + t.Product}
+	}
+	meta := templateMeta{TemplateID: t.ID, Severity: t.Severity, Tags: t.Tags, CWEs: t.CWEs}
+	_, err := ix.addDocument("template", t.ID, p, title, t.CVEs, cpeTags, meta, body)
 	return err
 }
 

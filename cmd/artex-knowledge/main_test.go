@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/doracpphp/artex-offline/knowledge"
 )
 
 // The builder packs data, not a checkout: hidden entries (.git) are skipped,
@@ -57,5 +59,62 @@ func TestCollectSelectsDataFiles(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("collected %v, want %v", got, want)
 		}
+	}
+}
+
+// build -base -delta-out writes the full pack and a delta against the previous
+// full pack: only the changed files, the deletions, and base_version set.
+func TestBuildWritesDeltaAgainstBase(t *testing.T) {
+	dir := t.TempDir()
+	keyBase := filepath.Join(dir, "k")
+	if err := keygen([]string{"-out", keyBase}); err != nil {
+		t.Fatal(err)
+	}
+	docs := func(name string, files map[string]string) string {
+		d := filepath.Join(dir, name)
+		for p, body := range files {
+			os.MkdirAll(filepath.Dir(filepath.Join(d, p)), 0o755)
+			os.WriteFile(filepath.Join(d, p), []byte(body), 0o644)
+		}
+		return d
+	}
+	v1 := filepath.Join(dir, "v1.tar.gz")
+	common := []string{"-key", keyBase + ".key", "-key-id", "k1", "-pack-id", "artex-core"}
+	if err := build(append(common, "-version", "1", "-out", v1,
+		"-docs", docs("d1", map[string]string{"keep.md": "keep", "change.md": "old", "drop.md": "drop"}))); err != nil {
+		t.Fatal(err)
+	}
+	v2, d2 := filepath.Join(dir, "v2.tar.gz"), filepath.Join(dir, "v2-delta.tar.gz")
+	if err := build(append(common, "-version", "2", "-out", v2, "-base", v1, "-delta-out", d2,
+		"-docs", docs("d2", map[string]string{"keep.md": "keep", "change.md": "new", "add.md": "add"}))); err != nil {
+		t.Fatal(err)
+	}
+	m, err := knowledge.PackManifest(d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, f := range m.Files {
+		files = append(files, f.Path)
+	}
+	sort.Strings(files)
+	if m.BaseVersion != "1" || len(files) != 2 || files[0] != "docs/add.md" || files[1] != "docs/change.md" ||
+		len(m.Deletions) != 1 || m.Deletions[0] != "docs/drop.md" {
+		t.Fatalf("delta: base %q files %v deletions %v", m.BaseVersion, files, m.Deletions)
+	}
+	if full, err := knowledge.PackManifest(v2); err != nil || full.BaseVersion != "" || len(full.Files) != 3 {
+		t.Fatalf("full v2: %+v %v", full, err)
+	}
+	if err := build(append(common, "-version", "3", "-out", filepath.Join(dir, "v3.tar.gz"), "-delta-out", filepath.Join(dir, "x"),
+		"-docs", docs("d3", map[string]string{"a.md": "a"}))); err == nil {
+		t.Error("-delta-out without -base must be refused")
+	}
+	// A base signed by another key is refused.
+	other := filepath.Join(dir, "other")
+	keygen([]string{"-out", other})
+	if err := build([]string{"-key", other + ".key", "-key-id", "k1", "-pack-id", "artex-core", "-version", "3",
+		"-out", filepath.Join(dir, "v3b.tar.gz"), "-base", v2, "-delta-out", filepath.Join(dir, "d3b.tar.gz"),
+		"-docs", docs("d4", map[string]string{"a.md": "a"})}); err == nil {
+		t.Error("a base pack signed by another key must be refused")
 	}
 }

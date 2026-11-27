@@ -69,9 +69,9 @@ type Manifest struct {
 	// Version orders packs of one id. Any monotonic string works; the builder
 	// uses the build date, e.g. "2026.11.27".
 	Version string `json:"version"`
-	// BaseVersion, when set, marks a delta pack that applies only on top of an
-	// active pack of exactly that version (Phase 1 builds full packs only; the
-	// field is defined so the format need not change later).
+	// BaseVersion, when set, marks a delta pack: it applies only on top of the
+	// active pack of the same id at exactly that version (delta.go). Files then
+	// lists only the added and changed files, and Deletions the removed ones.
 	BaseVersion string `json:"base_version,omitempty"`
 	// BuiltAt is when the pack was generated, in UTC.
 	BuiltAt time.Time `json:"built_at"`
@@ -84,10 +84,29 @@ type Manifest struct {
 	// Files lists every pack entry except manifest.json and manifest.sig, with
 	// the size and SHA-256 the importer checks as it extracts.
 	Files []FileEntry `json:"files"`
-	// Deletions lists paths a delta pack removes from the base (unused by full
-	// packs).
+	// Deletions lists paths a delta pack removes from the base (only with
+	// BaseVersion).
 	Deletions []string `json:"deletions,omitempty"`
+	// Embeddings declares precomputed chunk vectors shipped in the pack
+	// (embedfile.go). Optional; each set's file is one of Files.
+	Embeddings []EmbeddingSet `json:"embeddings,omitempty"`
 }
+
+// EmbeddingSet describes one file of precomputed chunk vectors. The importer
+// uses a set only when its model and chunking budget match the configured
+// embedding model and ARTEX_KNOWLEDGE_MAX_CHUNK_BYTES: vectors are keyed by the
+// SHA-256 of the exact chunk text, which depends on both.
+type EmbeddingSet struct {
+	Path       string `json:"path"`             // pack file under embeddings/
+	Model      string `json:"model"`            // embedding model name, as configured on import
+	Dimension  int    `json:"dimension"`        // vector length
+	ChunkBytes int    `json:"chunk_bytes"`      // chunking budget the chunks were cut with
+	Count      int    `json:"count"`            // number of vectors in the file
+	Digest     string `json:"digest,omitempty"` // model digest, when the builder knew it (informational)
+}
+
+// embeddingsPrefix is where precomputed vector files live in a pack.
+const embeddingsPrefix = "embeddings/"
 
 // Source is one upstream dataset a pack was built from.
 type Source struct {
@@ -141,10 +160,17 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("manifest: %s %q is invalid (1-64 characters from A-Z a-z 0-9 . _ + -, starting with a letter or digit)", f.name, f.v)
 		}
 	}
-	// Delta packs are not implemented: refuse the fields rather than import a
-	// delta as if it were a full pack.
-	if m.BaseVersion != "" || len(m.Deletions) > 0 {
-		return fmt.Errorf("manifest: delta packs (base_version / deletions) are not supported; build a full pack")
+	// A delta names the version it applies to, which must be older than its own;
+	// deletions exist only in a delta.
+	if m.BaseVersion != "" {
+		if !ValidID(m.BaseVersion) {
+			return fmt.Errorf("manifest: base_version %q is invalid", m.BaseVersion)
+		}
+		if CompareVersions(m.Version, m.BaseVersion) <= 0 {
+			return fmt.Errorf("manifest: delta version %s must be newer than its base %s", m.Version, m.BaseVersion)
+		}
+	} else if len(m.Deletions) > 0 {
+		return fmt.Errorf("manifest: deletions are only valid in a delta pack (with base_version)")
 	}
 	seen := make(map[string]bool, len(m.Files))
 	for _, f := range m.Files {
@@ -166,13 +192,39 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("manifest: file %q has an invalid sha256 %q", f.Path, f.SHA256)
 		}
 	}
+	deleted := make(map[string]bool, len(m.Deletions))
 	for _, d := range m.Deletions {
-		if _, err := SafePath(d); err != nil {
+		clean, err := SafePath(d)
+		if err != nil {
 			return fmt.Errorf("manifest: deletion %q: %w", d, err)
+		}
+		if seen[clean] {
+			return fmt.Errorf("manifest: %q is both a file and a deletion", clean)
+		}
+		if deleted[clean] {
+			return fmt.Errorf("manifest: duplicate deletion %q", clean)
+		}
+		deleted[clean] = true
+	}
+	for _, e := range m.Embeddings {
+		clean, err := SafePath(e.Path)
+		if err != nil || !strings.HasPrefix(clean, embeddingsPrefix) {
+			return fmt.Errorf("manifest: embedding set path %q must be a file under %s", e.Path, embeddingsPrefix)
+		}
+		// A full pack carries its sets; a delta may declare a set only for a file
+		// it ships (sets of the base are carried over by the merge).
+		if !seen[clean] {
+			return fmt.Errorf("manifest: embedding set %q is not one of the pack's files", clean)
+		}
+		if strings.TrimSpace(e.Model) == "" || e.Dimension < 1 || e.Dimension > maxEmbeddingDim || e.ChunkBytes < 16 || e.Count < 0 {
+			return fmt.Errorf("manifest: embedding set %q has an invalid model, dimension, chunk_bytes or count", clean)
 		}
 	}
 	return nil
 }
+
+// maxEmbeddingDim is pgvector's HNSW limit (vector.go).
+const maxEmbeddingDim = 2000
 
 // fileByPath indexes the manifest's files by their cleaned path.
 func (m *Manifest) fileByPath() map[string]FileEntry {

@@ -12,12 +12,21 @@
 //
 //	artex-knowledge build -key key.key -key-id artex-knowledge-1 \
 //	    -pack-id artex-core -version 2026.11.27 -out pack.tar.gz \
-//	    [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR]
+//	    [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR -templates-version TAG] \
+//	    [-embed-model M -embed-endpoint URL [-embed-provider ollama|openai] [-chunk-bytes N]] \
+//	    [-base PREVIOUS-FULL.tar.gz [-delta-out DELTA.tar.gz]]
 //	    Assemble the given sources into a signed pack. Each source flag points at
 //	    a local directory; its files are placed under the matching pack prefix.
+//	    -embed-* precomputes the chunk vectors and ships them in the pack (the
+//	    importer uses them when its embedding model and chunk size match).
+//	    -base reuses the previous full pack's vectors for unchanged chunks, and
+//	    -delta-out additionally writes a delta pack against it: only the changed
+//	    files, the deletions, and the new vectors. Keep every full pack: the next
+//	    delta is built against it.
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"flag"
@@ -60,7 +69,9 @@ func usage() {
 
   artex-knowledge keygen [-out key]
   artex-knowledge build -key key.key -key-id ID -pack-id ID -version V -out pack.tar.gz \
-      [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR]
+      [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR -templates-version TAG] \
+      [-embed-model M -embed-endpoint URL [-embed-provider ollama|openai] [-chunk-bytes N]] \
+      [-base PREVIOUS-FULL.tar.gz [-delta-out DELTA.tar.gz]]
 `)
 }
 
@@ -94,15 +105,26 @@ func build(args []string) error {
 	keyID := fs.String("key-id", "", "key id recorded in the manifest; must match a trusted key")
 	packID := fs.String("pack-id", "artex-core", "pack id (stable across versions)")
 	version := fs.String("version", "", "pack version (e.g. 2026.11.27); orders packs of one id")
-	out := fs.String("out", "", "output pack path (.tar.gz)")
+	out := fs.String("out", "", "output pack path (.tar.gz): the full pack")
 	exploitdb := fs.String("exploitdb", "", "ExploitDB mirror dir (files_exploits.csv + exploits/)")
 	nvd := fs.String("nvd", "", "dir of NVD 2.0 JSON snapshot files")
 	docs := fs.String("docs", "", "dir of technique docs (markdown)")
-	templates := fs.String("templates", "", "dir of nuclei templates (yaml)")
+	templates := fs.String("templates", "", "nuclei-templates checkout (its layout is kept, as in the image)")
+	templatesVersion := fs.String("templates-version", "", "release tag of the -templates checkout (e.g. v10.5.1); the importer compares it with the image's")
+	base := fs.String("base", "", "previous FULL pack of the same id: reuse its vectors, and with -delta-out build a delta against it")
+	deltaOut := fs.String("delta-out", "", "also write a delta pack against -base to this path")
+	embedModel := fs.String("embed-model", "", "embedding model to precompute chunk vectors with (e.g. nomic-embed-text); empty = no vectors")
+	embedEndpoint := fs.String("embed-endpoint", "", "embedding endpoint (e.g. http://127.0.0.1:11434)")
+	embedProvider := fs.String("embed-provider", "ollama", "embedding API: ollama (/api/embed) or openai (/v1/embeddings)")
+	embedDigest := fs.String("embed-digest", "", "optional model digest to record with the vectors")
+	chunkBytes := fs.Int("chunk-bytes", 4096, "chunk size the vectors are computed for; must equal the importer's ARTEX_KNOWLEDGE_MAX_CHUNK_BYTES")
 	fs.Parse(args)
 
 	if *keyFile == "" || *keyID == "" || *version == "" || *out == "" {
 		return fmt.Errorf("-key, -key-id, -version and -out are required")
+	}
+	if *deltaOut != "" && *base == "" {
+		return fmt.Errorf("-delta-out needs -base (the previous full pack)")
 	}
 	priv, err := loadPrivKey(*keyFile)
 	if err != nil {
@@ -137,24 +159,126 @@ func build(args []string) error {
 	if err := add("docs", *docs, hasExt(".md", ".markdown", ".txt", ".rst", ".adoc"), knowledge.Source{Name: "docs"}); err != nil {
 		return err
 	}
-	if err := add("templates", *templates, hasExt(".yaml", ".yml"), knowledge.Source{Name: "nuclei-templates", License: "MIT"}); err != nil {
+	if *templates != "" && *templatesVersion == "" {
+		fmt.Println("  note: -templates-version is not set; the importer will warn that the templates version is unknown")
+	}
+	if err := add("templates", *templates, hasExt(".yaml", ".yml"), knowledge.Source{Name: "nuclei-templates", Version: *templatesVersion, License: "MIT"}); err != nil {
 		return err
 	}
 	if len(in.Files) == 0 {
 		return fmt.Errorf("no source files found; pass at least one of -exploitdb/-nvd/-docs/-templates")
 	}
 
-	fmt.Printf("building %s %s (%d files)...\n", in.PackID, in.Version, len(in.Files))
-	if err := knowledge.BuildPackFile(*out, in, priv); err != nil {
+	// The previous full pack, when given, must be ours: the delta and the reused
+	// vectors are only as good as the base they are computed against.
+	var baseManifest *knowledge.Manifest
+	if *base != "" {
+		if baseManifest, err = loadOwnPack(*base, priv); err != nil {
+			return err
+		}
+	}
+
+	// Precomputed vectors: one file for the full pack, and the new vectors only
+	// for the delta.
+	var vecPath, fullVec, deltaVec string
+	var fullSet, deltaSet knowledge.EmbeddingSet
+	if *embedModel != "" {
+		emb, err := knowledge.NewEmbedder(knowledge.EmbedConfig{Provider: *embedProvider, Model: *embedModel, Endpoint: *embedEndpoint})
+		if err != nil {
+			return fmt.Errorf("embedding model: %w", err)
+		}
+		tmp, err := os.MkdirTemp(filepath.Dir(*out), ".artex-vectors-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmp)
+		fullVec = filepath.Join(tmp, "full.akv")
+		if *deltaOut != "" {
+			deltaVec = filepath.Join(tmp, "delta.akv")
+		}
+		fmt.Printf("embedding chunks with %s (chunk size %d)...\n", *embedModel, *chunkBytes)
+		fullSet, deltaSet, err = knowledge.BuildEmbeddings(context.Background(), knowledge.EmbedBuild{
+			Files: in.Files, ChunkBytes: *chunkBytes, Embedder: emb, Digest: *embedDigest,
+			BasePack: *base, FullOut: fullVec, DeltaOut: deltaVec,
+			Progress: func(done int) { fmt.Printf("\r  %d vectors", done) },
+		})
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+		vecPath = knowledge.EmbeddingFileName(*embedModel, *version)
+		fmt.Printf("  vectors   %5d (dimension %d)\n", fullSet.Count, fullSet.Dimension)
+	}
+
+	full := in
+	full.Files = copyFiles(in.Files)
+	if fullSet.Count > 0 {
+		fullSet.Path = vecPath
+		full.Files[vecPath] = fullVec
+		full.Embeddings = []knowledge.EmbeddingSet{fullSet}
+	}
+	if err := writePack(*out, full, priv); err != nil {
 		return err
 	}
-	fi, _ := os.Stat(*out)
-	fmt.Printf("wrote %s", *out)
+
+	if *deltaOut != "" {
+		din := in
+		din.Files = copyFiles(in.Files)
+		if deltaSet.Count > 0 {
+			deltaSet.Path = vecPath
+			din.Files[vecPath] = deltaVec
+			din.Embeddings = []knowledge.EmbeddingSet{deltaSet}
+		}
+		delta, err := knowledge.DeltaInput(din, baseManifest)
+		if err != nil {
+			return fmt.Errorf("delta against %s: %w", *base, err)
+		}
+		fmt.Printf("delta against %s %s: %d added or changed files, %d deletions\n",
+			baseManifest.PackID, baseManifest.Version, len(delta.Files), len(delta.Deletions))
+		if err := writePack(*deltaOut, delta, priv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loadOwnPack reads a previous pack's manifest and checks it was signed by the
+// key we sign with.
+func loadOwnPack(path string, priv ed25519.PrivateKey) (*knowledge.Manifest, error) {
+	m, err := knowledge.PackManifest(path)
+	if err != nil {
+		return nil, fmt.Errorf("base pack %s: %w", path, err)
+	}
+	pub := priv.Public().(ed25519.PublicKey)
+	if _, err := knowledge.VerifyPackFile(path, map[string]ed25519.PublicKey{m.KeyID: pub}); err != nil {
+		return nil, fmt.Errorf("base pack %s is not signed by this key: %w", path, err)
+	}
+	if m.BaseVersion != "" {
+		return nil, fmt.Errorf("base pack %s is a delta; pass the previous FULL pack", path)
+	}
+	return m, nil
+}
+
+func writePack(path string, in knowledge.PackInput, priv ed25519.PrivateKey) error {
+	fmt.Printf("building %s %s (%d files)...\n", in.PackID, in.Version, len(in.Files))
+	if err := knowledge.BuildPackFile(path, in, priv); err != nil {
+		return err
+	}
+	fi, _ := os.Stat(path)
+	fmt.Printf("wrote %s", path)
 	if fi != nil {
 		fmt.Printf(" (%d bytes)", fi.Size())
 	}
 	fmt.Println()
 	return nil
+}
+
+func copyFiles(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // collect walks dir and adds each matching regular file to files under

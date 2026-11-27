@@ -105,17 +105,19 @@ Online environment                            Offline environment
 A single tar.gz archive (`knowledge-pack-<ver>.tar.gz`):
 
 ```
-manifest.json          # pack id, version, base version (delta packs only), build time,
-                       # sources (upstream version + license), signing key id,
-                       # path / size / SHA-256 of every file, deletions (delta packs only)
+manifest.json          # format, kind, pack id, version, base version (delta packs only),
+                       # build time, sources (upstream version + license), signing key id,
+                       # path / size / SHA-256 of every file, deletions (delta packs only),
+                       # embedding sets (model, dimension, chunk size, count, digest)
 manifest.sig           # ed25519 signature over manifest.json
 exploitdb/             # files_exploits.csv + exploits directory (actual files)
-nvd/                   # NVD 2.0 API snapshot (CVE, CPE, match criteria) + CWE dictionary
+nvd/                   # NVD 2.0 API snapshot (CVE, CPE, match criteria)
 docs/                  # technique documents (PayloadsAllTheThings, HackTricks, WSTG …)
-templates/             # nuclei-templates
-embeddings/            # optional: precomputed chunk embeddings (model name, digest, dimension)
-index/meta.json        # document type, language, chunking settings
+templates/             # nuclei-templates, in the repository's (and the image's) layout
+embeddings/            # optional: precomputed chunk vectors, <model>-<version>.akv
 ```
+
+CWE names (the CWE dictionary) are not shipped yet: `lookup_cve` returns CWE ids only.
 
 - **Verification order**: Verify `manifest.sig` on the **raw manifest bytes** against the
   trusted keys **before parsing them** (`knowledge.VerifyRaw`): only bytes a trusted key
@@ -152,14 +154,24 @@ index/meta.json        # document type, language, chunking settings
 - **Rollback protection**: A validly signed old pack is still stale, and may be known-bad.
   Refuse a pack whose version is lower than the active pack with the same id unless the
   operator explicitly confirms the downgrade.
-- **Delta packs** (not implemented): they would carry `base_version` and a deletion list,
-  and apply only on top of an active pack of exactly that version. Until then a manifest
-  with either field is refused, so a delta is never imported as if it were a full pack.
+- **Delta packs** (`knowledge/delta.go`): a delta carries `base_version`, the added and
+  changed files and a deletion list, and applies only on top of the active pack of the same
+  id at exactly that version (anything else is refused, as is a deletion of a file the base
+  does not have). The importer builds the new version's directory from the base directory
+  — hard links, so unchanged files cost no copy; each is checked against the size its
+  manifest records — plus the delta's verified files, and indexes the merged set exactly as
+  it would a full pack. The builder makes a delta with `build -base PREVIOUS-FULL.tar.gz
+  -delta-out DELTA.tar.gz` (it also writes the full pack, which the next delta is built
+  against). Deltas chain: a delta against the full pack of version N applies to an N that
+  was itself imported as a delta, because both describe the same files.
 - **Storage**: Actual files are extracted under `data/knowledge/packs/<pack-id>/<version
   dir>/`, owned by the server; the directories are created `0750`, so the executor uid that
   agent processes run as can neither write nor read them (agents read pack content through
   the tools). Postgres holds only the search index and metadata. File paths are always
-  confined under the active version's directory.
+  confined under the active version's directory. Each version directory also keeps the
+  manifest it was indexed from as `manifest.json` — the signed one for a full pack, the
+  merged one for a delta — whose SHA-256 is `kb_packs.manifest_sha256`, so a later delta
+  can trust the base manifest it reads back.
 - **Import entry points**: there is **no UI yet**. `POST /api/knowledge/import` takes either
   `?path=` — a file inside the knowledge directory, e.g. `inbox/pack.tar.gz` (anything
   outside it is refused) — or the pack as a streamed request body, written to the inbox
@@ -233,8 +245,20 @@ ATT&CK option (E) in Phase 4.
   in the background after import (and at startup, resuming where it stopped), 64 chunks per
   request, one worker at a time but without rate limiting; lexical search answers in the
   meantime. Each search also needs one query embedding, bounded at 15 seconds before search
-  falls back to lexical. Shipping precomputed embeddings for a named model (name + digest +
-  dimension) inside a pack, used when the configured model matches, is planned for Phase 3.
+  falls back to lexical. Two things keep this cost down (`knowledge/embedfile.go`):
+  - **Precomputed vectors in the pack**: `build -embed-model … -embed-endpoint …` embeds the
+    chunks online and ships them under `embeddings/`, declared in the manifest (model,
+    dimension, chunk size, count, optional digest) and covered by its hashes like any file.
+    A vector is keyed by the SHA-256 of the exact chunk text, which builder and importer
+    produce with the same code, so a set is used only when its model name **and** chunk size
+    equal the configured `ARTEX_KNOWLEDGE_EMBED_MODEL` and `ARTEX_KNOWLEDGE_MAX_CHUNK_BYTES`;
+    otherwise it is ignored and the worker embeds locally. The digest is recorded for
+    information and not compared. With `-base`, the builder reuses the previous full
+    pack's vectors for unchanged chunks, and a delta ships only the new ones.
+  - **Reuse across updates**: right after a new version is activated, the current model's
+    vectors of the previous version's chunks are copied to the new chunks with the same
+    text, before the old rows are removed. An update — full or delta — therefore re-embeds
+    only what changed.
 - **Fusion**: Take the lexical and the vector top 4N and merge them with RRF (Reciprocal Rank
   Fusion, k = 60), returning the top N (`knowledge/hybrid.go`). Without the vector path —
   no embedder, no pgvector, no vectors of the current model yet, or a failed query
@@ -245,9 +269,9 @@ ATT&CK option (E) in Phase 4.
 | Tool | Input | Behavior |
 | --- | --- | --- |
 | `search_exploits` | Query, optional exploit type and platform | Hybrid search over the ExploitDB entries (CSV metadata + exploit file bodies). Returns EDB-ID, title, type, platform, date, verified flag, CVEs, path (when the pack carries the file), a snippet and the source |
-| `lookup_cve` | CVE ID | Returns the description, CVSS, CWEs and references from the NVD mirror, plus the ExploitDB entries that reference the CVE. Affected products are not listed (use `lookup_software` in the other direction); links to nuclei templates come with Phase 3 |
+| `lookup_cve` | CVE ID | Returns the description, CVSS, CWEs and references from the NVD mirror, the ExploitDB entries that reference the CVE, and the nuclei templates whose classification names it (id, name, severity, pack path, and `local_path` when this installation has the file, to run with `nuclei -t`). A CVE known only from an exploit or a template is still returned. Affected products are not listed (use `lookup_software` in the other direction) |
 | `lookup_software` | Product name, optional vendor and version | Folds the product to CPE form (lower case, spaces to underscores), prefers CVEs whose CPE product matches exactly and falls back to a literal substring match only when there is none, evaluates the NVD version ranges in Go, and returns one hit per CVE with the matched CPE, vendor, product, `match_basis` (`exact` / `partial`) and whether a version was checked — not a numeric confidence |
-| `search_technique` | Query (technique, payload, WAF evasion, etc.) | Hybrid search over the pack's `docs/` and `templates/` files. Returns title, path, chunk number, a snippet and the source |
+| `search_technique` | Query (technique, payload, WAF evasion, etc.) | Hybrid search over the pack's `docs/` and `templates/` files. Returns kind (`doc` / `template`), title, path, chunk number, a snippet and the source; a nuclei template hit adds its template id, severity and `local_path` |
 | `read_knowledge` | document id (EDB-ID, CVE id) or source path, plus a 1-based chunk number | Returns the full text of one chunk (capped at `ARTEX_KNOWLEDGE_MAX_CHUNK_BYTES`) and the document's chunk count; read further chunks with further calls. Progressive disclosure: search → read |
 | `copy_knowledge_file` | document id / source path, optional destination name | Copies the file (an exploit source, a doc or a template) into the run's working directory so that Bash and the file tools can use it; regular files up to 32 MiB |
 
@@ -398,9 +422,17 @@ compose service such as `http://ollama:11434` counts as local.
   `files_exploits.csv` is incomplete. `lookup_cve` → EDB-ID resolution follows a "return it
   if found" approach and treats missing entries as a normal case.
 - **One source for nuclei-templates**: The image already bakes in nuclei-templates for
-  execution ([offline-toolbox.md](offline-toolbox.md) §2). Record the templates version in
-  the pack manifest and warn at import when it differs from the image's, so that search
-  results do not point at templates the local nuclei does not have.
+  execution ([offline-toolbox.md](offline-toolbox.md) §2). The pack's `templates/` keeps
+  the repository layout, which is also the image's (`/opt/nuclei-templates`,
+  `NUCLEI_TEMPLATES_DIR`), so `templates/<rel>` is `<NUCLEI_TEMPLATES_DIR>/<rel>` locally.
+  The builder records the release tag (`-templates-version`) as the `nuclei-templates`
+  source version; the importer compares it with the image's (from the build-time tool
+  inventory) and returns a warning when they differ, when the pack does not record it, or
+  when the installation has no baked templates. Independently of the version, a hit carries
+  `local_path` only when that exact file exists locally, so it never names a template the
+  local nuclei cannot open (a revision difference within the same path is what the warning
+  is for). Templates are parsed (`knowledge/nuclei.go`): id, name, severity, tags, CVE and
+  CWE classification, vendor/product; other files under `templates/` are indexed as text.
 - **Licensing**: Sources come under different licenses, some with share-alike or
   non-commercial terms. Record each source's license in the manifest and check
   redistribution terms before distributing packs outside the organization.
@@ -429,6 +461,7 @@ no `knowledge` section is added there.
 | `ARTEX_OFFLINE_ALLOW_CIDRS` | Environment | Empty (extra ranges for the §4.5 gates and the firewall) |
 | `ARTEX_KNOWLEDGE_PUBKEY` / `ARTEX_KNOWLEDGE_KEY_ID` | Environment | None; adds one trusted signing key (never replaces an embedded one) |
 | `ARTEX_KNOWLEDGE_EMBED_PROVIDER` / `_MODEL` / `_ENDPOINT` | Environment | None (lexical search only); `ollama` or `openai` format |
+| `NUCLEI_TEMPLATES_DIR` | Environment (the image sets it) | `/opt/nuclei-templates` in the image; where template hits look for `local_path` |
 
 - **Disabled** (`ARTEX_KNOWLEDGE=0`): the tools are filtered out, the system-prompt line is
   omitted, and no index queries run. Pack files and tables are kept, so re-enabling needs no
@@ -515,9 +548,26 @@ Phase 2).
 - **Verified**: the embedding clients and RRF fusion by unit tests; the full vector path
   (background embedding, dimension-change rebuild, and vector-only recall a lexical query
   misses) by an integration test against a `pgvector/pgvector:pg16` database.
-- **Not yet**: precomputed embeddings shipped inside a pack (the "Embedding cost" note in
-  §4.2). It needs the builder and importer to chunk identically; for now the background
-  worker embeds against the configured local model. Tracked for a follow-up.
+- Precomputed embeddings shipped inside a pack arrived with Phase 3 (below).
+
+**Phase 3 status (2026-11-28)**: implemented.
+
+- **nuclei-templates** (option D, `knowledge/nuclei.go`): templates are parsed and
+  indexed with their id, CVEs, severity and tags; `lookup_cve` links them and
+  `search_technique` returns them, both with `local_path` when the installation has the
+  file; the templates version is compared with the image's at import (§5).
+- **Delta packs** (`knowledge/delta.go`, §4.1): accepted on top of exactly their base,
+  merged with hard links and indexed like a full pack; `build -base … -delta-out …` makes
+  them.
+- **Precomputed in-pack embeddings** and **reuse across updates**
+  (`knowledge/embedfile.go`, §4.2).
+- **Verified**: unit tests for template parsing, the vector file format, the builder's
+  vector reuse, delta computation and merge, and the version warning; Postgres integration
+  tests (`postgres:16-alpine` and `pgvector/pgvector:pg16`) for template links and local
+  paths, delta import including a chained delta and the refusals (no base, wrong base,
+  tampered stored manifest), precomputed vectors used without calling the model (and
+  ignored for another model), and vectors reused after an update; a CLI test for
+  `build -base -delta-out`.
 
 Phase plan:
 
@@ -529,10 +579,10 @@ Phase plan:
    Technique-document search (option B, lexical) and import from a server-side file / CLI
    landed in Phase 1 too.
 2. **Phase 2 (done)**: Hybrid search with pgvector + a local embedding model (option G): the
-   runtime-created vector table, background embedding, and RRF fusion. Precomputed
-   embeddings shipped in a pack remain for a follow-up (see the status note above).
-3. **Phase 3**: nuclei-templates (option D) with version alignment against the image; delta
-   packs; precomputed in-pack embeddings.
+   runtime-created vector table, background embedding, and RRF fusion.
+3. **Phase 3 (done)**: nuclei-templates (option D) with version alignment against the image;
+   delta packs; precomputed in-pack embeddings, plus vector reuse across updates. MSF module
+   metadata (the other half of option D) is not included.
 4. **Phase 4**: ATT&CK STIX (option E), EPSS/KEV snapshots, and integrated tags with skills.
 
 **Review follow-up (2026-11-27)**: a code, security and design review of the first

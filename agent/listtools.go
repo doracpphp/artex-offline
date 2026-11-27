@@ -100,6 +100,22 @@ func toolboxDir() string {
 	return defaultToolbox
 }
 
+// InstalledToolVersion returns the version the build-time tool inventory
+// records for a tool (e.g. "v10.5.1 (<commit>)" for nuclei-templates), or ""
+// when there is no inventory (a native run) or no such tool.
+func InstalledToolVersion(name string) string {
+	inv, err := readInventory(toolInventoryPath())
+	if err != nil {
+		return ""
+	}
+	for _, e := range inv.Tools {
+		if e.Name == name {
+			return e.Version
+		}
+	}
+	return ""
+}
+
 func readInventory(path string) (*toolInventory, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

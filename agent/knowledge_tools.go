@@ -129,9 +129,10 @@ func (t *ToolSet) searchExploits() actool.CoreTool {
 func (t *ToolSet) searchTechnique() actool.CoreTool {
 	return readTool(
 		"search_technique",
-		"Search the local technique documentation (PayloadsAllTheThings, HackTricks, WSTG, etc.) for how to do something: "+
-			"an attack technique, a payload, a WAF-evasion trick. Returns passages with their source path and a citation; "+
-			"use read_knowledge to get a passage's full text. Offline substitute for web search.",
+		"Search the local technique documentation (PayloadsAllTheThings, HackTricks, WSTG, etc.) and nuclei templates for how to do something: "+
+			"an attack technique, a payload, a WAF-evasion trick, a detection template. Returns passages with their source path and a citation; "+
+			"use read_knowledge to get a passage's full text. A nuclei template hit (kind \"template\") carries its template_id and, "+
+			"when this installation has that template, local_path to run it with nuclei -t. Offline substitute for web search.",
 		obj(map[string]any{
 			"query": str("what you want to do, in keywords (e.g. 'bypass WAF union select', 'JWT none algorithm')"),
 		}, "query"),
@@ -156,7 +157,8 @@ func (t *ToolSet) searchTechnique() actool.CoreTool {
 func (t *ToolSet) lookupCVE() actool.CoreTool {
 	return readTool(
 		"lookup_cve",
-		"Look up a CVE in the local NVD mirror: description, CVSS score, CWE, references, and the ExploitDB entries that reference it. "+
+		"Look up a CVE in the local NVD mirror: description, CVSS score, CWE, references, the ExploitDB entries that reference it, "+
+			"and the nuclei templates that detect it (with local_path when this installation has the template, to run it with nuclei -t). "+
 			"Offline substitute for searching the web for a CVE.",
 		obj(map[string]any{
 			"cve": str("a CVE id, e.g. CVE-2021-41773"),

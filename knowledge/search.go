@@ -41,24 +41,40 @@ type ExploitHit struct {
 	Source   string   `json:"source"`
 }
 
-// TechniqueHit is one search_technique result.
+// TechniqueHit is one search_technique result: a technique doc, or a nuclei
+// template (Kind "template", with its id, severity and, when this installation
+// has the same file, the local path to run it with nuclei -t).
 type TechniqueHit struct {
-	Title   string `json:"title"`
-	Path    string `json:"path"`
-	Chunk   int    `json:"chunk"`
-	Snippet string `json:"snippet"`
-	Source  string `json:"source"`
+	Kind       string `json:"kind"`
+	Title      string `json:"title"`
+	Path       string `json:"path"`
+	Chunk      int    `json:"chunk"`
+	TemplateID string `json:"template_id,omitempty"`
+	Severity   string `json:"severity,omitempty"`
+	LocalPath  string `json:"local_path,omitempty"`
+	Snippet    string `json:"snippet"`
+	Source     string `json:"source"`
+}
+
+// TemplateRef links a CVE to a nuclei template that detects it.
+type TemplateRef struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Severity  string `json:"severity,omitempty"`
+	Path      string `json:"path"`                 // pack path (read_knowledge / copy_knowledge_file)
+	LocalPath string `json:"local_path,omitempty"` // this installation's copy, for nuclei -t
 }
 
 // CVEInfo is the lookup_cve result.
 type CVEInfo struct {
-	ID          string       `json:"id"`
-	Description string       `json:"description"`
-	CVSS        *CVSS        `json:"cvss,omitempty"`
-	CWEs        []string     `json:"cwes,omitempty"`
-	References  []string     `json:"references,omitempty"`
-	Exploits    []ExploitRef `json:"exploits,omitempty"`
-	Source      string       `json:"source"`
+	ID          string        `json:"id"`
+	Description string        `json:"description"`
+	CVSS        *CVSS         `json:"cvss,omitempty"`
+	CWEs        []string      `json:"cwes,omitempty"`
+	References  []string      `json:"references,omitempty"`
+	Exploits    []ExploitRef  `json:"exploits,omitempty"`
+	Templates   []TemplateRef `json:"templates,omitempty"`
+	Source      string        `json:"source"`
 }
 
 // ExploitRef links a CVE to an exploit that references it.
@@ -164,19 +180,48 @@ func (s *Store) SearchTechnique(ctx context.Context, query string, limit int) ([
 	}
 	var out []TechniqueHit
 	for _, r := range rows {
-		out = append(out, TechniqueHit{
+		h := TechniqueHit{
+			Kind:    r.kind,
 			Title:   r.title.String,
 			Path:    r.sourcePath.String,
 			Chunk:   r.chunkIndex,
 			Snippet: snippet(r.body, query, 300),
 			Source:  source(r.packID, r.sourcePath.String, r.chunkIndex),
-		})
+		}
+		if r.kind == "template" {
+			var tm templateMeta
+			_ = json.Unmarshal(r.metaRaw, &tm)
+			h.TemplateID, h.Severity = tm.TemplateID, tm.Severity
+			h.LocalPath = s.localTemplatePath(h.Path)
+		}
+		out = append(out, h)
 	}
 	return out, nil
 }
 
-// LookupCVE returns one CVE's structured record and the exploits that reference
-// it. ok is false when the CVE is not in the active pack.
+// localTemplatePath maps a pack template path (templates/<rel>) to this
+// installation's copy (<NUCLEI_TEMPLATES_DIR>/<rel>), or "" when there is no
+// such file. The pack and image layouts match (nuclei.go); the file must exist,
+// so a version mismatch never yields a path nuclei cannot open.
+func (s *Store) localTemplatePath(packPath string) string {
+	if s.cfg.TemplatesDir == "" || !strings.HasPrefix(packPath, templatesPrefix) {
+		return ""
+	}
+	rel, err := SafePath(strings.TrimPrefix(packPath, templatesPrefix))
+	if err != nil {
+		return ""
+	}
+	p := filepath.Join(s.cfg.TemplatesDir, filepath.FromSlash(rel))
+	if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	return p
+}
+
+// LookupCVE returns one CVE's structured record, the exploits that reference
+// it and the nuclei templates that detect it. ok is false when the active pack
+// knows nothing about the CVE; a CVE missing from the NVD data but referenced by
+// an exploit or a template is still returned, with those links.
 func (s *Store) LookupCVE(ctx context.Context, cve string) (CVEInfo, bool, error) {
 	cve = strings.ToUpper(strings.TrimSpace(cve))
 	if !cveRe.MatchString(cve) {
@@ -185,28 +230,29 @@ func (s *Store) LookupCVE(ctx context.Context, cve string) (CVEInfo, bool, error
 	var packID string
 	var title sql.NullString
 	var metaRaw []byte
+	info := CVEInfo{ID: cve}
+	found := false
 	err := s.db.QueryRowContext(ctx, `
 SELECT p.pack_id, d.title, d.meta
 FROM kb_documents d
 JOIN kb_packs p ON p.id = d.pack_id AND p.active
 WHERE d.kind='cve' AND lower(d.ext_id)=lower($1)
 LIMIT 1`, cve).Scan(&packID, &title, &metaRaw)
-	if err == sql.ErrNoRows {
-		return CVEInfo{}, false, nil
-	}
-	if err != nil {
+	switch {
+	case err == sql.ErrNoRows:
+	case err != nil:
 		return CVEInfo{}, false, err
+	default:
+		found = true
+		var meta docMeta
+		_ = json.Unmarshal(metaRaw, &meta)
+		info.Description, info.CVSS, info.CWEs, info.References = title.String, meta.CVSS, meta.CWEs, meta.References
+		info.Source = source(packID, "nvd/"+cve, 0)
 	}
-	var meta docMeta
-	_ = json.Unmarshal(metaRaw, &meta)
-	info := CVEInfo{
-		ID:          cve,
-		Description: title.String,
-		CVSS:        meta.CVSS,
-		CWEs:        meta.CWEs,
-		References:  meta.References,
-		Source:      source(packID, "nvd/"+cve, 0),
+	if err := s.cveTemplates(ctx, &info); err != nil {
+		return info, found, err
 	}
+	found = found || len(info.Templates) > 0
 	// Exploits whose cve_ids contain this CVE.
 	exRows, err := s.db.QueryContext(ctx, `
 SELECT d.ext_id, d.source_path, d.title
@@ -226,7 +272,39 @@ LIMIT 50`, cve)
 		}
 		info.Exploits = append(info.Exploits, ExploitRef{EDBID: extID.String, Title: t.String, Path: sp.String})
 	}
-	return info, true, exRows.Err()
+	if err := exRows.Err(); err != nil {
+		return info, true, err
+	}
+	return info, found || len(info.Exploits) > 0, nil
+}
+
+// cveTemplates adds the nuclei templates whose classification names the CVE.
+func (s *Store) cveTemplates(ctx context.Context, info *CVEInfo) error {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT d.ext_id, d.title, d.source_path, d.meta
+FROM kb_documents d
+JOIN kb_packs p ON p.id = d.pack_id AND p.active
+WHERE d.kind='template' AND $1 = ANY(d.cve_ids)
+ORDER BY d.source_path
+LIMIT 20`, info.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, t, sp sql.NullString
+		var metaRaw []byte
+		if err := rows.Scan(&id, &t, &sp, &metaRaw); err != nil {
+			return err
+		}
+		var tm templateMeta
+		_ = json.Unmarshal(metaRaw, &tm)
+		info.Templates = append(info.Templates, TemplateRef{
+			ID: id.String, Name: t.String, Severity: tm.Severity, Path: sp.String,
+			LocalPath: s.localTemplatePath(sp.String),
+		})
+	}
+	return rows.Err()
 }
 
 // LookupSoftware resolves a product (and optional vendor and version) to the
