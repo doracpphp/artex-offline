@@ -37,9 +37,10 @@ var baseDial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Seco
 // Such a client never dials without one: a scope missing at the dial means the
 // context value was lost on the way, and the dial fails with
 // TARGET_GATE_UNAVAILABLE. A client built without a scope (the operator's test
-// endpoint) dials as before, and so does every client while the gate is off —
-// except that in offline mode those ungated dials reach local addresses only
-// (OfflineEgressBlocked). A gated scope stays the authority in offline mode.
+// endpoint) dials as before, and so does every client while the gate is off.
+// In offline mode every dial — ungated or gated — reaches only local or
+// ARTEX_OFFLINE_ALLOW_CIDRS addresses (OfflineEgressBlocked); a gated scope
+// can narrow that further but never widen it.
 func PinnedDialer(toolName string, scoped bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		scope, ok := TargetScopeFromContext(ctx)
@@ -106,10 +107,18 @@ func (i *Interceptor) dialTarget(ctx context.Context, scope TargetScope, toolNam
 		return nil, blocked(res)
 	}
 	switch ct := c.checked[0]; ct.cover {
+	// Offline mode: the gated scope can only narrow what offline mode allows. A
+	// covered target still has to be local or inside ARTEX_OFFLINE_ALLOW_CIDRS,
+	// the same rule the egress firewall applies, so approving a public host (or
+	// a derived exemption such as a stale cloud profile URL) cannot widen reach.
 	case coverDerived, coverNameOnly:
-		return i.baseDialer()(ctx, network, addr)
+		return offlineDial(ctx, network, addr, i.baseDialer())
 	default:
-		return i.dialAddrs(ctx, network, ct.ips, t.Port)
+		ips, err := offlineFilter(t.String(), ct.ips)
+		if err != nil {
+			return nil, err
+		}
+		return i.dialAddrs(ctx, network, ips, t.Port)
 	}
 }
 
@@ -357,10 +366,17 @@ func (i *Interceptor) resolveTargetUDP4(ctx context.Context, scope TargetScope, 
 		return nil, blocked(res)
 	}
 	switch ct := c.checked[0]; ct.cover {
+	// Offline mode: the scope only narrows; the destination must still be local
+	// or allow-listed (see dialTarget).
 	case coverDerived, coverNameOnly:
-		return resolvePlainUDP4(ctx, addr)
+		a, err := resolvePlainUDP4(ctx, addr)
+		return offlineUDP(addr, a, err)
 	default:
-		return firstIPv4UDPAddr(ct.ips, t.Port)
+		ips, err := offlineFilter(t.String(), ct.ips)
+		if err != nil {
+			return nil, err
+		}
+		return firstIPv4UDPAddr(ips, t.Port)
 	}
 }
 

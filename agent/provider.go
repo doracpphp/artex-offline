@@ -617,11 +617,13 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey, userAgent string) (*http.Clie
 		default:
 			return nil, fmt.Errorf("llm: unsupported proxy scheme %q (use http, https or socks5)", proxyURL.Scheme)
 		}
-		// A public proxy would let LLM traffic escape the dial guard (the dial
-		// then targets the proxy, not the endpoint). Offline mode allows only a
-		// local proxy.
-		if offline.Enabled() && !offline.IsLocalHost(proxyURL.Hostname()) {
-			return nil, fmt.Errorf("llm: offline mode refuses a non-local proxy %q (set %s=0 to allow external connections)", proxyURL.Hostname(), offline.Env)
+		// Offline mode refuses any LLM proxy. The dial guard can only check the
+		// proxy's own address, and even a local proxy forwards to whatever
+		// destination it is asked for — prompts carry target data, so a LAN
+		// forward proxy would be a third-party egress path. A local LLM needs no
+		// proxy.
+		if offline.Enabled() {
+			return nil, fmt.Errorf("llm: offline mode does not allow an LLM proxy (%q): a proxy can forward to any destination; reach the local LLM directly, or set %s=0", proxyURL.Hostname(), offline.Env)
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}

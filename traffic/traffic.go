@@ -551,9 +551,11 @@ func ValidateProxyURL(raw string) (*url.URL, error) {
 	if u.Host == "" {
 		return nil, fmt.Errorf("proxy %q is missing a host", raw)
 	}
-	// Offline mode: a proxy that is not local would carry the traffic out.
-	if err := offline.CheckURLLocal("egress proxy", u.Scheme+"://"+u.Host); err != nil {
-		return nil, err
+	// Offline mode refuses any egress proxy, local or not: a proxy forwards to
+	// whatever destination it is asked for, so even a LAN proxy is a path to the
+	// internet that neither the dial guards nor the firewall can see past.
+	if offline.Enabled() {
+		return nil, fmt.Errorf("offline mode does not allow an egress proxy (%s): a proxy can forward to any destination; clear it, or set %s=0", u.Host, offline.Env)
 	}
 	return u, nil
 }

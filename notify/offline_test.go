@@ -5,10 +5,12 @@ import (
 	"testing"
 )
 
-// In offline mode the delivery dial guard inverts: local destinations are
-// allowed (a LAN relay / local webhook) while any public IM or mail service is
-// refused. Link-local, including the cloud metadata endpoint, stays blocked.
-func TestBlockInternalDialOfflineInversion(t *testing.T) {
+// In offline mode the delivery dial guard adds a restriction: LAN destinations
+// (a relay / local webhook) are allowed while any public IM or mail service is
+// refused. Link-local and metadata (incl. IPv6 IMDS) stay blocked, and loopback
+// still needs the ARTEX_NOTIFY_ALLOW_LOCAL opt-in — offline mode must not
+// loosen the existing SSRF protection.
+func TestBlockInternalDialOfflineAddsRestriction(t *testing.T) {
 	// The suite TestMain sets ARTEX_NOTIFY_ALLOW_LOCAL=1; clear it so the test
 	// relies only on the offline policy, then restore it.
 	prevAllow := os.Getenv(AllowLocalTargetsEnv)
@@ -17,17 +19,23 @@ func TestBlockInternalDialOfflineInversion(t *testing.T) {
 
 	t.Setenv("ARTEX_OFFLINE", "1")
 
-	localOK := []string{"127.0.0.1:25", "192.168.1.10:443", "10.0.0.5:80"}
-	for _, a := range localOK {
+	for _, a := range []string{"192.168.1.10:443", "10.0.0.5:80"} {
 		if err := blockInternalDial("tcp", a, nil); err != nil {
-			t.Errorf("offline: local delivery %s must be allowed: %v", a, err)
+			t.Errorf("offline: LAN delivery %s must be allowed: %v", a, err)
 		}
 	}
-	publicBlocked := []string{"8.8.8.8:443", "160.79.104.10:443", "169.254.169.254:80"}
-	for _, a := range publicBlocked {
+	for _, a := range []string{"8.8.8.8:443", "160.79.104.10:443", "169.254.169.254:80", "[fd00:ec2::254]:80", "127.0.0.1:25"} {
 		if err := blockInternalDial("tcp", a, nil); err == nil {
-			t.Errorf("offline: public/metadata delivery %s must be refused", a)
+			t.Errorf("offline: delivery to %s must be refused (public, metadata, or loopback without opt-in)", a)
 		}
+	}
+	// The loopback opt-in still works in offline mode.
+	_ = os.Setenv(AllowLocalTargetsEnv, "1")
+	if err := blockInternalDial("tcp", "127.0.0.1:25", nil); err != nil {
+		t.Errorf("offline: loopback with the opt-in must be allowed: %v", err)
+	}
+	if err := blockInternalDial("tcp", "8.8.8.8:443", nil); err == nil {
+		t.Error("offline: the loopback opt-in must not re-open public delivery")
 	}
 }
 

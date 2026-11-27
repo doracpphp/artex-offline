@@ -44,11 +44,34 @@ func AllowCIDRs() (prefixes []netip.Prefix, invalid []string) {
 	return prefixes, invalid
 }
 
+// metadataAddrs are cloud instance-metadata endpoints. Some sit inside ranges
+// offline mode otherwise treats as local (fd00:ec2::254 is ULA, i.e.
+// IsPrivate) or that an operator might allow-list (100.100.100.200 lies in
+// CGNAT space), so they are refused before any other rule. This mirrors
+// intercept.metadataAddrs, which the target gate refuses for the same reason.
+var metadataAddrs = []netip.Addr{
+	netip.MustParseAddr("169.254.169.254"), // AWS / GCP / Azure / OCI IMDS (IPv4)
+	netip.MustParseAddr("fd00:ec2::254"),   // AWS IMDS over IPv6
+	netip.MustParseAddr("100.100.100.200"), // Alibaba Cloud
+}
+
+// IsMetadataAddr reports whether a is a cloud instance-metadata endpoint.
+func IsMetadataAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	for _, m := range metadataAddrs {
+		if a == m {
+			return true
+		}
+	}
+	return false
+}
+
 // AllowedAddr reports whether offline mode permits a connection to a: a local
-// address (IsLocalIP) or one inside an operator-declared AllowCIDRsEnv range.
+// address (loopback, RFC1918 / ULA) or one inside an operator-declared
+// AllowCIDRsEnv range — never a cloud metadata endpoint, whatever the range.
 func AllowedAddr(a netip.Addr) bool {
 	a = a.Unmap()
-	if !a.IsValid() {
+	if !a.IsValid() || IsMetadataAddr(a) {
 		return false
 	}
 	if a.IsLoopback() || a.IsPrivate() {
@@ -134,6 +157,42 @@ func AllowedAddrs(ctx context.Context, host string) ([]netip.Addr, error) {
 		return nil, &EgressError{Target: host, Reason: fmt.Sprintf("%s resolves to %s, which is not a local address", h, joinAddrs(refused))}
 	}
 	return out, nil
+}
+
+// RequireAllAllowed is the strict form of AllowedAddrs for a caller that cannot
+// dial the checked addresses itself (it hands the NAME to code that resolves
+// again, e.g. the recording proxy's go-mitmproxy dialer): it refuses the host
+// when ANY of its addresses is not permitted, so a name with a mixed local and
+// public answer cannot be used to reach the public one. Returns nil when
+// offline mode is off.
+func RequireAllAllowed(ctx context.Context, host string) error {
+	if !Enabled() {
+		return nil
+	}
+	h := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(host), "["), "]")
+	if a, err := netip.ParseAddr(h); err == nil {
+		if !AllowedAddr(a) {
+			return &EgressError{Target: host, Reason: fmt.Sprintf("%s is not a local address", a.Unmap())}
+		}
+		return nil
+	}
+	if h == "" {
+		return &EgressError{Target: host, Reason: "no host"}
+	}
+	addrs, err := Resolver.LookupNetIP(ctx, "ip", h)
+	if err != nil {
+		return &EgressError{Target: host, Reason: "the name could not be resolved (" + err.Error() + ")"}
+	}
+	var refused []netip.Addr
+	for _, a := range addrs {
+		if !AllowedAddr(a) {
+			refused = append(refused, a.Unmap())
+		}
+	}
+	if len(addrs) == 0 || len(refused) > 0 {
+		return &EgressError{Target: host, Reason: fmt.Sprintf("%s resolves to %s, which is not a local address", h, joinAddrs(refused))}
+	}
+	return nil
 }
 
 func joinAddrs(addrs []netip.Addr) string {

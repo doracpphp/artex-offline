@@ -101,6 +101,46 @@ func TestPinnedDialerOfflineGateOff(t *testing.T) {
 	}
 }
 
+// In offline mode a gated scope can only narrow the offline rule, never widen
+// it: an approved (pinned) public host is refused unless its range is in
+// ARTEX_OFFLINE_ALLOW_CIDRS, while an approved LAN host is reached as before.
+func TestPinnedDialerOfflineGatedScopeOnlyNarrows(t *testing.T) {
+	t.Setenv(offline.Env, "1")
+	t.Setenv(offline.AllowCIDRsEnv, "")
+	g, rec := dialGate(t)
+	srv, _, port := pinnedServer(t, "pinned")
+	rec.route("203.0.113.7:"+port, srv.Listener.Addr().String())
+	g.res.set("public.example.com", "203.0.113.7")
+	g.pin("public.example.com", atoiPort(t, port), "203.0.113.7")
+
+	_, err := PinnedDialer("WebFetch", true)(g.ctx(), "tcp", "public.example.com:"+port)
+	wantOfflineBlock(t, err)
+	if calls := rec.calls(); len(calls) != 0 {
+		t.Fatalf("an approved public host must not be dialled offline, dialled %v", calls)
+	}
+
+	// The operator's allow-list is the authority for non-local ranges.
+	t.Setenv(offline.AllowCIDRsEnv, "203.0.113.0/24")
+	conn, err := PinnedDialer("WebFetch", true)(g.ctx(), "tcp", "public.example.com:"+port)
+	if err != nil {
+		t.Fatalf("an approved host inside ARTEX_OFFLINE_ALLOW_CIDRS must be reached: %v", err)
+	}
+	conn.Close()
+}
+
+func TestOfflineRefusesMetadataEvenWhenAllowListed(t *testing.T) {
+	offlineFixture(t)
+	t.Setenv(offline.AllowCIDRsEnv, "fd00::/8, 169.254.0.0/16, 100.64.0.0/10")
+	for _, ip := range []string{"fd00:ec2::254", "169.254.169.254", "100.100.100.200"} {
+		if _, err := offlineFilter(ip, []string{ip}); err == nil {
+			t.Errorf("metadata address %s must be refused even inside an allow-listed range", ip)
+		}
+	}
+	if got, err := offlineFilter("fd00::5", []string{"fd00::5"}); err != nil || len(got) != 1 {
+		t.Errorf("an ordinary ULA address must still pass: %v %v", got, err)
+	}
+}
+
 func TestPinnedDialerOfflineOffUnchanged(t *testing.T) {
 	rec := offlineFixture(t)
 	t.Setenv(offline.Env, "0")
