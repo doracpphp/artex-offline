@@ -91,7 +91,7 @@ Online environment                            Offline environment
 │ artex-knowledge build    │                  │ ARTEX (offline mode)                   │
 │  ├ exploitdb (git)       │  signed pack     │  knowledge import → verify → index     │
 │  ├ nvd (2.0 snapshot)    │ ── USB/scp ──▶   │   ├ Postgres FTS/trigram (+pgvector)   │
-│  ├ PayloadsAllTheThings  │                  │   └ data/knowledge/<pack-id>/          │
+│  ├ PayloadsAllTheThings  │                  │   └ data/knowledge/packs/<id>/<ver>/   │
 │  ├ HackTricks, WSTG      │                  │  agent tools:                          │
 │  └ nuclei-templates      │                  │   search_exploits / lookup_cve         │
 └──────────────────────────┘                  │   lookup_software / search_technique   │
@@ -173,18 +173,26 @@ index/meta.json        # document type, language, chunking settings
 | --- | --- |
 | `kb_packs` | Pack management (pack id, version, key id and fingerprint, manifest hash, files directory, import timestamp, active flag) |
 | `kb_key_pins` | The signing key each pack id is pinned to (TOFU; §4.1) |
-| `kb_documents` | Metadata for documents/exploits in a pack (id, pack_id, kind, source_path, title, cve_ids, cpe_tags, technique_ids) |
-| `kb_chunks` | Body chunks + `tsvector` column (GIN index); a trigram index for the identifier fallback is created at runtime when `pg_trgm` is available |
-| `kb_embeddings` | Chunk embeddings (chunk_id, model, dimension, `vector`); **created at runtime** only when pgvector is available (see below) |
+| `kb_documents` | One row per CVE, exploit, doc or template in a pack (pack row, kind `cve` / `exploit` / `doc` / `template`, ext_id such as the CVE id or EDB-ID, source_path, title, cve_ids, cpe_tags, and a `meta` jsonb with the structured fields: CVSS, CWE and references for a CVE; type, platform, date, port, author and verified for an exploit) |
+| `kb_chunks` | Body chunks + a generated `tsvector` column (GIN index); a trigram index for the substring fallback is created at runtime when `pg_trgm` is available |
+| `kb_cpe_matches` | One row per CVE applicability criterion (vendor, product, CPE criteria, vulnerable flag, version-range bounds) for `lookup_software` |
+| `kb_embeddings` | Chunk embeddings (chunk_id, model, `vector(N)`); **created at runtime** only when pgvector is available (see below). The dimension N is the column's, fixed per table |
+
+Technique tags (`technique_ids`, e.g. ATT&CK ids) are not stored yet; they arrive with the
+ATT&CK option (E) in Phase 4.
 
 > **Premise**: `db/` makes no use of full-text search today, so the FTS foundation is
 > **entirely new**. Postgres itself is already a dependency. The schema goes into a numbered
 > migration (`db/migrations/NNNN_knowledge.sql`), which `db.Open` applies once and then
 > locks by checksum.
 >
-> - **`pg_trgm`** is a contrib module shipped in the stock `postgres:16-alpine` image, so
->   `CREATE EXTENSION IF NOT EXISTS pg_trgm` can live in that migration.
-> - **pgvector is not shipped, and must not go in that migration.** On the stock image the
+> - **No extension is created by the migration.** `pg_trgm` ships in the stock
+>   `postgres:16-alpine` image, but an external database's role may lack the right to
+>   create extensions, and a migration that fails blocks startup. So the knowledge package
+>   creates `pg_trgm` and its two trigram indexes at startup, best effort
+>   (`Store.EnsureTrigramIndexes`); without them search works the same, only the substring
+>   fallback scans sequentially, and the startup log says so.
+> - **pgvector is not shipped either, and must not go in that migration.** On the stock image the
 >   migration would fail and block startup, and a migration guarded by an availability check
 >   would never run again once pgvector is installed later. Instead, the knowledge package
 >   creates the `vector` extension and `kb_embeddings` at runtime when
@@ -195,53 +203,67 @@ index/meta.json        # document type, language, chunking settings
 >   image to a Debian (glibc) based image changes collation behavior, so text indexes must be
 >   rebuilt with `REINDEX` after the switch. The alternative is to build pgvector into an
 >   Alpine-based image. With an external database (`ARTEX_PG_DSN`), the role may not be
->   allowed to create extensions; the feature then runs lexical-only and says so in the UI.
+>   allowed to create extensions; the feature then runs lexical-only and says so in the
+>   startup log (there is no knowledge UI yet).
 
-- **Lexical search**: `tsvector` with a GIN index, ranked with `ts_rank_cd`. The security
-  corpus is predominantly English, so docs/ uses the `english` configuration, while
-  identifiers (CVE, CPE, function names, payload symbols) use `simple` together with
-  `pg_trgm` to catch symbols and partial matches. Postgres tokenizes the documents; for
-  query preprocessing (lowercasing, splitting identifiers) the tokenizer in the existing
-  `agent/toolrag.go` can be reused.
-- **Vector**: pgvector (HNSW). For embeddings, add an "embedding" role to the existing LLM
-  profile mechanism and have it point at a local server (Ollama `nomic-embed-text`,
-  `bge-m3`, etc.). **Note**: The existing providers assume chat-completions; the embeddings
-  endpoint (`/v1/embeddings` / Ollama `/api/embed`) is a new provider surface, so the
-  implementation effort is larger than "adding one setting". It is also a *separate* endpoint
-  from the chat LLM: a chat-only local gateway (e.g. Strata, which serves chat/completions and
-  Anthropic messages but no embeddings) cannot provide the vectors, so a deployment that uses
-  such a gateway for the LLM runs a dedicated local embedder (Ollama) for the vector half, or
-  stays lexical-only. Calls go through a dialer with
-  `offline.GuardDial`, like the LLM client (§4.5). A vector column has a fixed dimension, so
-  each row records its model and dimension; changing the embedding model means re-embedding.
-  Common models (768 / 1024 dimensions) fit within pgvector's 2,000-dimension HNSW limit.
+- **Lexical search**: every chunk (CVE, exploit, doc, template) has a generated `tsvector`
+  in the `english` configuration with a GIN index; the query goes through
+  `websearch_to_tsquery('english', …)` and results are ranked with `ts_rank_cd`. Identifiers
+  that the English parser splits or stems (`CVE-2021-41773`, `wp-config.php`, function
+  names, payload symbols) are caught by a case-insensitive substring match (`ILIKE`) OR-ed
+  into the same query, which the trigram index speeds up when `pg_trgm` is present. There
+  is no separate `simple`-configuration index and no query preprocessing beyond what
+  `websearch_to_tsquery` does.
+- **Vector**: pgvector (HNSW, cosine distance). The embedding model is configured with
+  environment variables, not an LLM profile: `ARTEX_KNOWLEDGE_EMBED_PROVIDER` (`ollama` for
+  `/api/embed`, or `openai` for `/v1/embeddings`), `ARTEX_KNOWLEDGE_EMBED_MODEL` (e.g.
+  `nomic-embed-text`, `bge-m3`) and `ARTEX_KNOWLEDGE_EMBED_ENDPOINT` (`knowledge/embed.go`).
+  It is a *separate* endpoint from the chat LLM: a chat-only local gateway (e.g. Strata,
+  which serves chat/completions and Anthropic messages but no embeddings) cannot provide the
+  vectors, so a deployment that uses such a gateway for the LLM runs a dedicated local
+  embedder (Ollama) for the vector half, or stays lexical-only. The endpoint must be local in
+  offline mode (`offline.CheckURLLocal`) and every call dials through `offline.GuardDial`,
+  like the LLM client (§4.5). Each row records the model that made it, and search uses only
+  the current model's rows. A changed model drops the stale vectors and re-embeds; a changed
+  dimension rebuilds the table (the column dimension is fixed). An embedder that returns
+  vectors of the wrong dimension stops the background worker with an error. Common models
+  (768 / 1024 dimensions) fit within pgvector's 2,000-dimension HNSW limit.
 - **Embedding cost**: Embedding a multi-GB corpus on a local server can take hours and
-  competes with the chat model for the GPU. A pack may therefore carry precomputed embeddings
-  for a named model (name + digest + dimension). Import uses them when the configured
-  embedding model matches; otherwise it embeds in the background at low priority, and lexical
-  search is available in the meantime. Each search also needs one (short) query embedding.
-- **Fusion**: Merge the lexical top k and the vector top k with RRF (Reciprocal Rank Fusion)
-  and return the top N. Without the vector path, return the lexical ranking as is.
+  competes with the chat model for the GPU. Today the chunks of the active pack are embedded
+  in the background after import (and at startup, resuming where it stopped), 64 chunks per
+  request, one worker at a time but without rate limiting; lexical search answers in the
+  meantime. Each search also needs one query embedding, bounded at 15 seconds before search
+  falls back to lexical. Shipping precomputed embeddings for a named model (name + digest +
+  dimension) inside a pack, used when the configured model matches, is planned for Phase 3.
+- **Fusion**: Take the lexical and the vector top 4N and merge them with RRF (Reciprocal Rank
+  Fusion, k = 60), returning the top N (`knowledge/hybrid.go`). Without the vector path —
+  no embedder, no pgvector, no vectors of the current model yet, or a failed query
+  embedding — return the lexical ranking as is.
 
 ### 4.3 Agent Tools (toolcatalog Additions)
 
 | Tool | Input | Behavior |
 | --- | --- | --- |
-| `search_exploits` | Query (keyword/CVE/type/platform) | Hybrid search over the ExploitDB CSV + exploit bodies. Returns EDB-ID, title, type, platform, date, verified flag and path |
-| `lookup_cve` | CVE ID | Returns the description, CVSS, CWE, affected products/versions and references from the NVD mirror, plus linked EDB-IDs and nuclei templates when known |
-| `lookup_software` | Product name + version (optional vendor / CPE) | Normalizes the fingerprint to CPE candidates, evaluates NVD match criteria including version ranges, and returns matching CVEs with the basis and confidence of each match (§5) |
-| `search_technique` | Query (technique, payload, WAF evasion, etc.) | Hybrid search over technique documents under docs/. Returns snippets with source paths |
-| `read_knowledge` | document id / source path (+ chunk range) | Returns the full text of a chunk (capped). Progressive disclosure: search → read |
-| `copy_knowledge_file` | document id / source path | Copies the file (exploit source, template, wordlist) into the run's working directory so that Bash and the file tools can use it |
+| `search_exploits` | Query, optional exploit type and platform | Hybrid search over the ExploitDB entries (CSV metadata + exploit file bodies). Returns EDB-ID, title, type, platform, date, verified flag, CVEs, path (when the pack carries the file), a snippet and the source |
+| `lookup_cve` | CVE ID | Returns the description, CVSS, CWEs and references from the NVD mirror, plus the ExploitDB entries that reference the CVE. Affected products are not listed (use `lookup_software` in the other direction); links to nuclei templates come with Phase 3 |
+| `lookup_software` | Product name, optional vendor and version | Folds the product to CPE form (lower case, spaces to underscores), prefers CVEs whose CPE product matches exactly and falls back to a literal substring match only when there is none, evaluates the NVD version ranges in Go, and returns one hit per CVE with the matched CPE, vendor, product, `match_basis` (`exact` / `partial`) and whether a version was checked — not a numeric confidence |
+| `search_technique` | Query (technique, payload, WAF evasion, etc.) | Hybrid search over the pack's `docs/` and `templates/` files. Returns title, path, chunk number, a snippet and the source |
+| `read_knowledge` | document id (EDB-ID, CVE id) or source path, plus a 1-based chunk number | Returns the full text of one chunk (capped at `ARTEX_KNOWLEDGE_MAX_CHUNK_BYTES`) and the document's chunk count; read further chunks with further calls. Progressive disclosure: search → read |
+| `copy_knowledge_file` | document id / source path, optional destination name | Copies the file (an exploit source, a doc or a template) into the run's working directory so that Bash and the file tools can use it; regular files up to 32 MiB |
 
-Binding: register the tools as toolcatalog seeds (`ToolSeed.Agents`). `search_*` /
-`lookup_*` / `read_knowledge` are bound to **both `planner` and `worker`** by default
-(knowledge serves action and is needed in both the planning and execution phases).
-`copy_knowledge_file` is bound to `worker` only, since the planner has no shell or file
-tools. For `mainagent` (chat) and custom agents the tools are not bound by default; the
-operator can bind them in System → Tools. When knowledge search is disabled or no pack is
-active, the tools are filtered out when tools are resolved, instead of answering "no data"
-on every call.
+Binding: the tools are part of the planner's and the worker's built-in tool sets
+(`PlannerTools` / `WorkerTools`), and so enter the tool catalog as seeds bound to those
+agents (`BuiltinToolSeeds`). `search_*` / `lookup_*` / `read_knowledge` are bound to **both
+`planner` and `worker`** (knowledge serves action and is needed in both the planning and
+execution phases); `copy_knowledge_file` to `worker` only, since the planner has no shell
+or file tools. In System → Tools an operator can unbind them from those two agents, but
+**cannot add them to another agent**: ToolResolve only filters an agent's built-in set, and
+the main agent (chat), goals, auto and pentest agents do not carry these tools, so checking
+them there has no effect. Offering them to the main agent would need the tools added to its
+built-in set and its prompt switched to `offlineBlock(true)`, which adds the knowledge
+line (today only the planner and worker prompts carry it). When
+knowledge search is disabled (`ARTEX_KNOWLEDGE=0`) or no pack is active, the tools are
+filtered out when tools are resolved, instead of answering "no data" on every call.
 
 Why `copy_knowledge_file` is needed: the agent's file tools are confined to the run's working
 directory (`os.Root`, `agent/filetools.go`), and Bash runs as the unprivileged executor, which
@@ -269,7 +291,10 @@ Design rules:
   spliced into a system prompt. Exploit code and technique pages routinely contain imperative
   text ("run this", "now execute …"), which is exactly what the boundary exists for;
   operators who turn the boundary off should know the corpus is then unframed.
-- **Limits** — Cap the number of chunks and bytes per response to protect the context budget.
+- **Limits** — Cap the number of results and bytes per response to protect the context
+  budget: `ARTEX_KNOWLEDGE_MAX_CHUNKS` (default 8) results per search and
+  `ARTEX_KNOWLEDGE_MAX_CHUNK_BYTES` (default 4096) per chunk; `lookup_software` returns at
+  most 50 CVEs.
 
 ### 4.4 LLM Steering (Discouraging Web Search)
 
