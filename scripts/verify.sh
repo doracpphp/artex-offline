@@ -154,17 +154,15 @@ if [ "$GO_ONLY" -eq 0 ] && [ "$WEB_ONLY" -eq 0 ]; then
   require_cmd python3
   if command -v shellcheck >/dev/null 2>&1; then
     run_step "shellcheck" shellcheck -S warning \
-      install.sh update.sh start.sh scripts/backup.sh scripts/verify.sh \
-      reset-password.sh scripts/extract-changelog-section.sh \
-      scripts/test-extract-changelog-section.sh .github/scripts/bot.sh \
-      scripts/test-bot-context.sh
+      install.sh update.sh start.sh offline-firewall.sh scripts/backup.sh \
+      scripts/verify.sh reset-password.sh scripts/extract-changelog-section.sh \
+      scripts/test-extract-changelog-section.sh scripts/tool-inventory.sh
   else
     printf 'note: shellcheck is not installed; skipping the shellcheck step\n'
   fi
   run_step "posture check" python3 scripts/posture_check_test.py
   run_step "benchmark tests" python3 -m unittest discover -s scripts/benchmark -p 'test_*.py' -v
   run_step "changelog section tests" bash scripts/test-extract-changelog-section.sh
-  run_step "bot context tests" bash scripts/test-bot-context.sh
 fi
 
 printf '\n'

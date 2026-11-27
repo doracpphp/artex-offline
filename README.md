@@ -15,15 +15,12 @@ and every finding stays bound to the assets and HTTP traffic that prove it.
 > knowledge base (ExploitDB / NVD / technique docs) that replaces web search. It is licensed
 > under the AGPL-3.0, same as upstream — see [`NOTICE`](NOTICE) for attribution.
 
-[![Release](https://img.shields.io/github/v/release/BaaRai/ARTEX?label=release&color=6b34db)](https://github.com/BaaRai/ARTEX/releases)
-[![License](https://img.shields.io/github/license/BaaRai/ARTEX?color=6b34db)](LICENSE)
-[![CI](https://github.com/BaaRai/ARTEX/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/BaaRai/ARTEX/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/github/go-mod/go-version/BaaRai/ARTEX?color=6b34db)](go.mod)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/VKyvMTcgXh)
+[![Release](https://img.shields.io/github/v/release/doracpphp/artex-offline?label=release&color=6b34db)](https://github.com/doracpphp/artex-offline/releases)
+[![License](https://img.shields.io/github/license/doracpphp/artex-offline?color=6b34db)](LICENSE)
+[![CI](https://github.com/doracpphp/artex-offline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/doracpphp/artex-offline/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/doracpphp/artex-offline?color=6b34db)](go.mod)
 
 [Quick start](#quick-start) · [Screenshots](#screenshots) · [How it works](#how-it-works) · [Install](#installation) · [Configuration](#configuration) · [Security](SECURITY.md)
-
-[![Join us on Discord](https://img.shields.io/badge/JOIN%20US%20ON-DISCORD-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/VKyvMTcgXh)
 
 </div>
 
@@ -53,9 +50,9 @@ justify it, and every autonomous action passes through scope rules, approval gat
 ## Quick start
 
 ```bash
-git clone https://github.com/BaaRai/ARTEX.git
-cd ARTEX
-cp .env.example .env            # set POSTGRES_PASSWORD (and optionally an LLM key)
+git clone https://github.com/doracpphp/artex-offline.git
+cd artex-offline
+cp .env.example .env            # set POSTGRES_PASSWORD and your local LLM (ARTEX_LLM_*)
 docker compose up -d --build    # builds from this checkout, starts PostgreSQL
 ```
 
@@ -67,9 +64,9 @@ docker compose logs artex | grep "Setup token"
 ```
 
 > Multi-arch release images (`linux/amd64`, `linux/arm64`) are published to GitHub Container
-> Registry at `ghcr.io/baarai/artex` from the next tagged release; v0.7.0 predates the publish
-> step. For pulling the prebuilt image and all other installation paths (script, binaries,
-> source, release archives), see [Installation](#installation).
+> Registry at `ghcr.io/doracpphp/artex-offline` from this fork's first tagged release. For
+> pulling the prebuilt image and all other installation paths (script, binaries, source,
+> release archives), see [Installation](#installation).
 
 ---
 
@@ -326,8 +323,8 @@ worker remains confined to the intent it claimed.
 ### Option 1: one-click install script (recommended)
 
 ```bash
-git clone https://github.com/BaaRai/ARTEX.git
-cd ARTEX
+git clone https://github.com/doracpphp/artex-offline.git
+cd artex-offline
 ./install.sh
 ```
 
@@ -347,9 +344,9 @@ first-run claim), or keep loopback and use a reverse proxy or SSH tunnel.
 Build from a checkout with Docker Compose:
 
 ```bash
-git clone https://github.com/BaaRai/ARTEX.git
-cd ARTEX
-cp .env.example .env            # set POSTGRES_PASSWORD, optionally ANTHROPIC_API_KEY
+git clone https://github.com/doracpphp/artex-offline.git
+cd artex-offline
+cp .env.example .env            # set POSTGRES_PASSWORD and your local LLM (ARTEX_LLM_*)
 docker compose up -d --build
 # → http://localhost:8787
 ```
@@ -376,7 +373,7 @@ Set the `ARTEX_PG_*` variables below. The example uses Docker Desktop's
 the reachable hostname of your database server.
 
 ```bash
-docker pull ghcr.io/baarai/artex:latest
+docker pull ghcr.io/doracpphp/artex-offline:latest
 
 mkdir -p data keys
 docker run -d --name artex \
@@ -392,7 +389,7 @@ docker run -d --name artex \
   -e ARTEX_JWT_KEY_DIR=/app/keys \
   -v "$PWD/data:/app/data" \
   -v "$PWD/keys:/app/keys" \
-  ghcr.io/baarai/artex:latest
+  ghcr.io/doracpphp/artex-offline:latest
 # → http://localhost:8787  (docker logs artex | grep "Setup token")
 ```
 
@@ -414,9 +411,9 @@ checkout build above until the next tagged release. Once the first image is publ
 the file and `.env.example` once:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/BaaRai/ARTEX/main/docker-compose.ghcr.yml
-curl -fsSLO https://raw.githubusercontent.com/BaaRai/ARTEX/main/.env.example
-cp .env.example .env            # set POSTGRES_PASSWORD, optionally an LLM key
+curl -fsSLO https://raw.githubusercontent.com/doracpphp/artex-offline/main/docker-compose.ghcr.yml
+curl -fsSLO https://raw.githubusercontent.com/doracpphp/artex-offline/main/.env.example
+cp .env.example .env            # set POSTGRES_PASSWORD and your local LLM (ARTEX_LLM_*)
 docker compose -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.ghcr.yml up -d
 # → http://localhost:8787  (docker compose -f docker-compose.ghcr.yml logs artex | grep "Setup token")
@@ -439,7 +436,7 @@ Legacy SSE servers usually establish the event stream with `GET /sse` and receiv
 
 ### Option 3: prebuilt binaries (Releases)
 
-Download the zip for your platform from [Releases](https://github.com/BaaRai/ARTEX/releases). It
+Download the zip for your platform from [Releases](https://github.com/doracpphp/artex-offline/releases). It
 contains `artex`, `start.sh` (`start.bat` on Windows), `skills/` and `config.example.json`:
 
 ```bash
@@ -459,7 +456,7 @@ neither.
 
 ```bash
 sha256sum -c SHA256SUMS                           # add --ignore-missing if you downloaded only some zips
-gh attestation verify <zip> --repo BaaRai/ARTEX   # built by this repository's release workflow
+gh attestation verify <zip> --repo doracpphp/artex-offline   # built by this repository's release workflow
 ```
 
 ### Option 4: build the single binary from source
@@ -735,7 +732,7 @@ service, the `depends_on` block, and the `pgdata` volume from `docker-compose.ym
 ```yaml
 services:
   artex:
-    image: ghcr.io/baarai/artex:latest
+    image: ghcr.io/doracpphp/artex-offline:latest
     security_opt:
       - "no-new-privileges:true"
     environment:
@@ -931,7 +928,7 @@ Your data is unaffected: `./data`, the `pgdata` volume and `./skills` are not pa
 #### Option 1: one-click update script
 
 ```bash
-cd ARTEX
+cd artex-offline
 ./update.sh
 ```
 
@@ -942,15 +939,15 @@ recompile `./artex`; restart the process for it to take effect).
 #### Option 2: Docker (Compose or GHCR image)
 
 ```bash
-cd ARTEX
+cd artex-offline
 git pull
 docker compose build artex
 docker compose up -d artex
 docker image prune -f            # optional
 ```
 
-If running the prebuilt `ghcr.io/baarai/artex` container directly, pull the new tag (`docker pull
-ghcr.io/baarai/artex:latest` or a pinned `:v<version>`) and recreate the container with the same
+If running the prebuilt `ghcr.io/doracpphp/artex-offline` container directly, pull the new tag (`docker pull
+ghcr.io/doracpphp/artex-offline:latest` or a pinned `:v<version>`) and recreate the container with the same
 `/app/data` and `/app/keys` mounts. If you run the prebuilt Compose stack, the update is:
 
 ```bash
