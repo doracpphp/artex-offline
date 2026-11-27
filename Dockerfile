@@ -156,6 +156,30 @@ RUN set -eux; \
     count="$(find /opt/nuclei-templates -name '*.yaml' | wc -l)"; \
     echo "baked nuclei templates: $count"; \
     test "$count" -gt 10000
+# enum4linux-ng: SMB / RPC / LDAP enumeration of Windows and Samba hosts
+# (cddmp/enum4linux-ng, GPL-3.0; standalone CLI dependency, not linked code). Like
+# sqlmap it is a shallow clone of a pinned tag with the commit asserted. It drives
+# smbclient, rpcclient, nmblookup and net (samba packages in the runtime stage) and
+# runs on the runtime stage's Debian python3, whose python3-impacket, python3-ldap3
+# and python3-yaml it imports.
+ARG ENUM4LINUX_NG_VERSION=v1.3.10
+ARG ENUM4LINUX_NG_COMMIT=f34e7bb3bc2bcd10267a7257fb3658154434ccf4
+RUN set -eux; \
+    git clone --quiet --depth 1 --branch "$ENUM4LINUX_NG_VERSION" \
+      https://github.com/cddmp/enum4linux-ng /opt/enum4linux-ng; \
+    commit="$(git -C /opt/enum4linux-ng rev-parse HEAD)"; \
+    if [ "$commit" != "$ENUM4LINUX_NG_COMMIT" ]; then echo "enum4linux-ng commit mismatch: want $ENUM4LINUX_NG_COMMIT got $commit" >&2; exit 1; fi; \
+    rm -rf /opt/enum4linux-ng/.git; \
+    test -f /opt/enum4linux-ng/enum4linux-ng.py
+# Versions of everything this stage pinned, for the build-time tool inventory
+# list_tools reads (scripts/tool-inventory.sh). Kept apart from /out, which is
+# copied wholesale into /usr/local/bin. Columns: name, version, path (optional).
+RUN mkdir -p /inventory && printf '%s\t%s\t%s\n' \
+      nuclei "$NUCLEI_VERSION" "" httpx "$HTTPX_VERSION" "" subfinder "$SUBFINDER_VERSION" "" \
+      katana "$KATANA_VERSION" "" ffuf "$FFUF_VERSION" "" dalfox "$DALFOX_VERSION" "" \
+      sqlmap "$SQLMAP_VERSION" "" enum4linux-ng "$ENUM4LINUX_NG_VERSION" "" \
+      nuclei-templates "$NUCLEI_TEMPLATES_VERSION ($NUCLEI_TEMPLATES_COMMIT)" /opt/nuclei-templates \
+      >/inventory/pinned.tsv
 
 # ---------------------------------------------------------------- runtime ---
 FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
@@ -167,6 +191,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       arp-scan arping fping iproute2 netdiscover net-tools nfs-common \
       python3-impacket python3-paramiko python3-scapy rpcbind sqlite3 xxd \
       hashcat hydra john ncrack openssh-client ssh-audit sshpass \
+      smbclient samba-common-bin ldap-utils python3-ldap3 python3-yaml \
+      iptables \
     && rm -rf /var/lib/apt/lists/*
 # Node 22 from the official nodejs.org tarball: bookworm's apt nodejs is 18,
 # Playwright requires >=20, and 20 is end-of-life. 22 matches the CI and release
@@ -194,6 +220,7 @@ RUN set -eux; \
 # plus the baked nuclei template set (see the tools stage for why it is baked).
 COPY --from=tools /out/ /usr/local/bin/
 COPY --from=tools /opt/sqlmap /opt/sqlmap
+COPY --from=tools /opt/enum4linux-ng /opt/enum4linux-ng
 COPY --from=tools /opt/nuclei-templates /opt/nuclei-templates
 # Read by nuclei in preference to $HOME/nuclei-templates, so root and the executor
 # resolve the same set. The directory stays root-owned and world-readable; scans
@@ -206,10 +233,16 @@ ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates \
 # -duc is what keeps this a check rather than an update: `nuclei -tl` runs the
 # automatic nuclei/templates update check first, so it could replace the pinned set
 # with the latest release inside the layer we are about to inspect.
+# The enum4linux-ng launcher uses Debian's /usr/bin/python3, not the image's python3
+# (3.12 in /usr/local), which cannot import the apt-installed impacket/ldap3/yaml.
 RUN set -eux; \
     ln -s /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap; \
+    printf '#!/bin/sh\nexec /usr/bin/python3 /opt/enum4linux-ng/enum4linux-ng.py "$@"\n' >/usr/local/bin/enum4linux-ng; \
+    chmod 0755 /usr/local/bin/enum4linux-ng; \
     nuclei -version >/dev/null; httpx -version; subfinder -version; katana -version; \
     ffuf -V >/dev/null; dalfox --version >/dev/null; sqlmap --version >/dev/null; \
+    enum4linux-ng -h >/dev/null; smbclient --version; rpcclient --version; nmblookup --version; \
+    ldapsearch -VV 2>&1 | head -1; \
     templates="$(nuclei -tl -silent -duc | wc -l)"; \
     echo "nuclei templates visible at build time: $templates"; \
     test "$templates" -gt 10000
@@ -275,8 +308,29 @@ COPY --from=build /out/artex /app/artex
 # to artex — docker stop only signals PID 1; without forwarding, artex never receives it,
 # cannot shut down gracefully, and is hard-killed by SIGKILL after 10 seconds.
 COPY start.sh /app/start.sh
-RUN chmod +x /app/artex /app/start.sh && mkdir -p -m 0700 /app/keys \
+# Egress firewall of the offline overlay; start.sh runs it as root when
+# ARTEX_OFFLINE_FIREWALL is on (docker-compose.offline.yml).
+COPY offline-firewall.sh /app/offline-firewall.sh
+# Build-time tool inventory for list_tools: versions come from the pins and from
+# dpkg, so no tool is executed to list it at runtime.
+ARG ARTEX_VERSION=dev
+COPY --from=tools /inventory/pinned.tsv /tmp/pinned.tsv
+COPY scripts/tool-inventory.sh /tmp/tool-inventory.sh
+RUN sh /tmp/tool-inventory.sh /tmp/pinned.tsv "$ARTEX_VERSION" \
+      "bbot=$BBOT_VERSION" "playwright=$PLAYWRIGHT_VERSION" "playwright-cli=$PLAYWRIGHT_CLI_VERSION" \
+      >/app/tool-inventory.json \
+    && rm -f /tmp/pinned.tsv /tmp/tool-inventory.sh \
+    && jq -e '.tools | length > 30' /app/tool-inventory.json >/dev/null
+RUN chmod +x /app/artex /app/start.sh /app/offline-firewall.sh && mkdir -p -m 0700 /app/keys \
     && chmod 0711 /root
+# A passwd entry for the agents' executor (server/execpriv.go: uid/gid 10001).
+# Without one, every tool that looks up the current user fails for agents: ssh
+# ("No user exists for uid 10001"), smbclient -N (an empty user name the server
+# rejects), whoami, Python's getpass. The home is the executor home the server
+# prepares under the data directory; ssh reads ~/.ssh from here, not from $HOME.
+RUN groupadd --system --gid 10001 artex-exec \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home \
+         --home-dir /app/data/exec-home --shell /usr/sbin/nologin artex-exec
 # No setuid or setgid programs (su, passwd, mount, bbot's chrome_sandbox, ...): an
 # agent process runs as the executor and must not regain root through one, even
 # when the container runs without docker-compose.yml's no-new-privileges.

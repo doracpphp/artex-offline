@@ -274,13 +274,16 @@ function interceptPageQuery(page: number, size: number, filter: InterceptApprova
 export const api = {
   // Backend application version (injected via ldflags at release, default "dev").
   // isolation: result of the startup agent isolation self-test; "degraded" shows a banner on every page.
+  // egress_firewall: only with the offline compose overlay; "degraded" shows a banner on every page.
   health: () =>
     get<{
       ok: boolean;
       service: string;
       version: string;
       latest_version?: string;
+      offline?: boolean;
       isolation?: { mode: "isolated" | "degraded"; reason?: string };
+      egress_firewall?: { mode: "enforced" | "degraded"; reason?: string };
     }>("/health"),
 
   // ---- auth ----

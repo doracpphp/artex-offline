@@ -33,6 +33,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/notify"
+	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/skill"
 )
@@ -2208,6 +2209,13 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Offline / local-LLM-only: a saved profile must point at a local LLM
+	// endpoint (Ollama, or an OpenAI/Anthropic-compatible local gateway such as
+	// Strata), regardless of wire format. A no-op when offline mode is off.
+	if err := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy).ValidateOffline(); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	id, err := pg.SaveProfile(&p)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -2488,6 +2496,13 @@ func (s *Server) isBlockedModelAddr(addr netip.Addr, allowPrivate bool) bool {
 	if v4, ok := modelEmbeddedIPv4(addr); ok {
 		addr = v4
 	}
+	// Offline / local-LLM-only inverts the default public-only policy: only a
+	// local endpoint may be listed. Loopback and private (RFC1918 / ULA) are
+	// allowed; a public address — and link-local / instance-metadata — is
+	// refused (addr.IsPrivate excludes link-local, preserving that protection).
+	if offline.Enabled() {
+		return !offline.AllowedAddr(addr) // + ARTEX_OFFLINE_ALLOW_CIDRS
+	}
 	if s != nil && s.allowLoopbackModels && addr.IsLoopback() {
 		return false
 	}
@@ -2562,6 +2577,11 @@ func (g *modelURLGuard) blockDial(_, address string, _ syscall.RawConn) error {
 		return &modelURLRefusalError{msg: "target address is not allowed"}
 	}
 	allowPrivate := g.isAllowedDialAddr(addr, port)
+	// Offline mode admits local endpoints without an explicit allow-list entry;
+	// isBlockedModelAddr still refuses any public address.
+	if offline.Enabled() {
+		allowPrivate = true
+	}
 	if g.s.isBlockedModelAddr(addr, allowPrivate) {
 		return &modelURLRefusalError{msg: "target address is not allowed"}
 	}
@@ -2594,6 +2614,12 @@ func (g *modelURLGuard) validateURL(ctx context.Context, rawURL, role string) (*
 	}
 	hostPort := net.JoinHostPort(normHost, strconv.Itoa(port))
 	allowPrivate := g.privateEndpoints[hostPort]
+	// Offline mode admits any local endpoint (loopback, private, localhost,
+	// host.docker.internal) without an ARTEX_LLM_PRIVATE_ENDPOINTS entry;
+	// isBlockedModelAddr still refuses public hosts.
+	if offline.Enabled() {
+		allowPrivate = true
+	}
 
 	if kind == intercept.TargetIP {
 		addr, err := netip.ParseAddr(normHost)

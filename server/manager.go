@@ -24,6 +24,7 @@ import (
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/artex/traffic/rewrite"
 	actool "github.com/Autumn-27/norma/tool"
@@ -560,6 +561,15 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
 	}
+	// Offline mode: a saved proxy that is not local would carry agent traffic
+	// out (ProxyAddr hands it to agent shells while capture is off). Ignore it
+	// for this run; the stored value is kept for when offline mode is turned off.
+	if m.globalProxy != "" {
+		if err := offline.CheckURLLocal("global egress proxy", proxyWithoutCredentials(m.globalProxy)); err != nil {
+			log.Printf("[offline] global egress proxy %q ignored: %v", proxyWithoutCredentials(m.globalProxy), err)
+			m.globalProxy = ""
+		}
+	}
 	if m.traffic != nil {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
 			// Neither the stored value nor err (which quotes it) is logged: both
@@ -683,6 +693,11 @@ func (m *Manager) WebSearch() (on bool, backend, braveKey, tavilyKey, keenableKe
 // its key (so a half-configured backend never silently drops the tool at session build).
 func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	on, backend, braveKey, tavilyKey, keenableKey, proxy := m.WebSearch()
+	// Offline mode: every backend is a third-party service, so the web_search
+	// tool is never given to an agent, whatever the saved setting says.
+	if offline.Enabled() {
+		on = false
+	}
 	if on && backend == "brave-free" && strings.TrimSpace(braveKey) == "" {
 		on = false
 	}
@@ -1079,7 +1094,7 @@ func (m *Manager) targetGateEndpoints() []string {
 		out = append(out, p.BaseURL, p.Proxy)
 	}
 	on, backend, _, _, _, searchProxy := m.WebSearch()
-	if on {
+	if on && !offline.Enabled() {
 		out = append(out, searchBackendEndpoints[backend])
 	}
 	return append(out, searchProxy, m.ProxyAddr(), m.GlobalProxy())

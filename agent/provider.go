@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
@@ -176,6 +178,32 @@ func normalizeOllamaBaseURL(raw string) string {
 // NeedsAPIKey reports whether this provider format requires an API key to be
 // usable. Ollama (local server) is keyless; every cloud format needs one.
 func (c Config) NeedsAPIKey() bool { return c.Format != FormatOllama }
+
+// effectiveBaseURL returns the endpoint this config will actually hit, applying
+// the per-format default. Ollama defaults to the local server; the cloud
+// formats keep an empty base URL as "" so offline validation can reject the
+// implicit public default (api.anthropic.com / api.openai.com).
+func (c Config) effectiveBaseURL() string {
+	b := strings.TrimSpace(c.BaseURL)
+	if c.Format == FormatOllama && b == "" {
+		return DefaultOllamaBaseURL
+	}
+	return b
+}
+
+// ValidateOffline returns a non-nil error when offline / local-LLM-only mode is
+// active and this config would reach a non-local LLM endpoint — a cloud
+// provider, or a cloud format left at its public default. It is a no-op when
+// offline mode is off. Callers use it to refuse a cloud configuration up front
+// with a clear message, before the dial-time guard in quotaAwareHTTPClient would
+// refuse the connection anyway. A local LLM (Ollama, or an OpenAI/Anthropic-
+// compatible local gateway such as Strata) passes regardless of wire format.
+func (c Config) ValidateOffline() error {
+	if !offline.Enabled() {
+		return nil
+	}
+	return offline.CheckEndpointLocal(c.effectiveBaseURL())
+}
 
 // CompactionWindow returns the model context window in TOKENS for compaction
 // thresholds, resolved from the user-configured size (ContextWindowK). 0/unset →
@@ -563,6 +591,17 @@ func requestBodySnapshot(req *http.Request) string {
 
 func quotaAwareHTTPClient(proxy, sessionHeaderKey, userAgent string) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Offline / local-LLM-only: pin every LLM dial to a local address. Control
+	// runs after name resolution with the concrete IP, so this is the final
+	// enforcement point and also defeats DNS rebinding and cross-host redirects
+	// toward a public endpoint. A no-op when offline mode is off.
+	if offline.Enabled() {
+		transport.DialContext = (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control:   offline.GuardDial,
+		}).DialContext
+	}
 	proxy = strings.TrimSpace(proxy)
 	if proxy == "" {
 		transport.Proxy = nil // empty = direct; no fallback to the HTTP_PROXY/HTTPS_PROXY env vars
@@ -577,6 +616,12 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey, userAgent string) (*http.Clie
 			return nil, fmt.Errorf("llm: proxy %q missing scheme (use http://, https:// or socks5://)", proxy)
 		default:
 			return nil, fmt.Errorf("llm: unsupported proxy scheme %q (use http, https or socks5)", proxyURL.Scheme)
+		}
+		// A public proxy would let LLM traffic escape the dial guard (the dial
+		// then targets the proxy, not the endpoint). Offline mode allows only a
+		// local proxy.
+		if offline.Enabled() && !offline.IsLocalHost(proxyURL.Hostname()) {
+			return nil, fmt.Errorf("llm: offline mode refuses a non-local proxy %q (set %s=0 to allow external connections)", proxyURL.Hostname(), offline.Env)
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}

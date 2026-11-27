@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -150,6 +151,27 @@ func redirectPolicy(base *url.URL) func(*http.Request, []*http.Request) error {
 	}
 }
 
+// transport returns the HTTP transport of a client: nil (http.DefaultTransport)
+// in the common case, one that skips TLS verification when insecure is set, and
+// in offline mode one that checks the resolved address of every connection
+// (offline.GuardDial) and ignores the environment proxy, which would otherwise
+// make the connection on the client's behalf.
+func transport(insecure bool) http.RoundTripper {
+	if !offline.Enabled() {
+		if insecure {
+			return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		}
+		return nil
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: offline.GuardDial}).DialContext
+	if insecure {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	return tr
+}
+
 // parseMCPURL parses and validates a configured MCP endpoint URL.
 func parseMCPURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
@@ -182,10 +204,10 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 	if err != nil {
 		return nil, err
 	}
-	hc := &http.Client{Timeout: timeout, CheckRedirect: redirectPolicy(base)}
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	if err := offline.CheckURLLocal("MCP server", url); err != nil {
+		return nil, err
 	}
+	hc := &http.Client{Timeout: timeout, CheckRedirect: redirectPolicy(base), Transport: transport(insecure)}
 	c := &Client{
 		server:   server,
 		url:      url,
@@ -211,10 +233,10 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	if err != nil {
 		return nil, err
 	}
-	hc := &http.Client{CheckRedirect: redirectPolicy(base)} // the SSE stream is intentionally long-lived.
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	if err := offline.CheckURLLocal("MCP server", sseURL); err != nil {
+		return nil, err
 	}
+	hc := &http.Client{CheckRedirect: redirectPolicy(base), Transport: transport(insecure)} // the SSE stream is intentionally long-lived.
 	streamCtx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
 	if err != nil {

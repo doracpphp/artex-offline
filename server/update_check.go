@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Autumn-27/artex/offline"
 )
 
 // The update check is opt-in: only ARTEX_UPDATE_CHECK=1 (or true/on/yes) lets
@@ -19,6 +21,11 @@ const updateCheckURL = "https://api.github.com/repos/BaaRai/ARTEX/releases/lates
 const updateCheckInterval = 24 * time.Hour
 
 func updateCheckEnabled() bool {
+	// Offline mode blocks all third-party egress, so the GitHub release check is
+	// forced off regardless of ARTEX_UPDATE_CHECK.
+	if offline.Enabled() {
+		return false
+	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("ARTEX_UPDATE_CHECK"))) {
 	case "1", "true", "on", "yes":
 		return true

@@ -29,6 +29,12 @@ var noTargetTools = toolSet(
 	"insert_assets", "add_company_scope", "add_task_scope", "list_assets",
 	"list_untested_assets", "list_companies", "report_finding", "record_fact",
 	"save_task_credential", "list_task_credentials", "ingest_bbot", "ingest_scan_output", "record_coverage",
+	// the installed-tool inventory: reads local manifests, its input is a filter
+	"list_tools",
+	// knowledge search: inputs are a query / CVE id / product / ref, not a network
+	// target. copy_knowledge_file copies a local pack file into the run directory.
+	"search_exploits", "lookup_cve", "lookup_software", "search_technique",
+	"read_knowledge", "copy_knowledge_file",
 	// cross-task orchestration, findings and retests (server)
 	"list_tasks", "list_llm_profiles", "spawn_task", "pause_task", "get_task_graph",
 	"list_task_findings", "add_task_hint", "get_task_worker_trace",

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/offline"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
@@ -73,6 +74,12 @@ func New(c Config) (*Store, error) {
 		(u.Scheme != "https" && !(u.Scheme == "http" && loopback)) {
 		return nil, errors.New("archive S3 endpoint must be an HTTPS origin (HTTP allowed only on loopback)")
 	}
+	// Offline mode: the archive store must be local (e.g. MinIO on the LAN); a
+	// cloud bucket would ship task data out. The dial guard below checks the
+	// resolved address of every connection as well.
+	if err := offline.CheckURLLocal("archive S3", c.Endpoint); err != nil {
+		return nil, err
+	}
 	c.Prefix = strings.Trim(c.Prefix, "/")
 	if c.Prefix == "" {
 		c.Prefix = "artex/tasks"
@@ -109,6 +116,9 @@ func New(c Config) (*Store, error) {
 	// Load shared AWS settings (including custom CAs) for both credential modes.
 	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
 		t.ResponseHeaderTimeout = 60 * time.Second
+		if offline.Enabled() {
+			t.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: offline.GuardDial}).DialContext
+		}
 	})
 	options := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(c.Region), awsconfig.WithHTTPClient(httpClient),

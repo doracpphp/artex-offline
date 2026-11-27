@@ -38,8 +38,10 @@ justify it, and every autonomous action passes through scope rules, approval gat
   findings, evidence quotes and retests are tied to the exact request/response.
 - **Autonomy with brakes.** Human-in-the-loop approvals, argv-prefix rules, scope/deny gates,
   token and turn budgets, a target noise governor, and prompt-injection framing on tool output.
-- **Self-hosted and model-agnostic.** One Go binary with the Next.js UI embedded, PostgreSQL,
-  your own Anthropic/OpenAI-compatible endpoint, or a local Ollama.
+- **Self-hosted and offline by default.** One Go binary with the Next.js UI embedded,
+  PostgreSQL, and a **local LLM** — Ollama, a local [Strata](https://github.com/Niko1221/Strata)
+  gateway, or any local OpenAI/Anthropic-compatible server. Offline mode (on by default) blocks
+  every third-party outbound connection; set `ARTEX_OFFLINE=0` to allow cloud providers.
 
 ---
 
@@ -499,9 +501,95 @@ runtime supports it.
 }
 ```
 
-**LLM**: `export ANTHROPIC_API_KEY=sk-...` (or `OPENAI_API_KEY`), or configure it in the UI's
-"LLM Configuration" page, which can also add a local Ollama server as a keyless provider (format
-"Ollama", default base URL `http://127.0.0.1:11434/v1`). Optional:
+**Offline / local-LLM mode** (`ARTEX_OFFLINE`, **on by default**): ARTEX runs with a local LLM
+only and blocks all third-party outbound traffic — cloud LLM APIs, the GitHub update check, and
+external notification channels (email/Telegram/DingTalk/Feishu/WeCom/webhook) are refused; only
+local destinations (loopback, LAN, RFC1918/ULA private) are reachable. Enforcement is at dial
+time, so it also defeats DNS rebinding and cross-host redirects. The restriction is **host-based,
+not format-based**: any local endpoint works regardless of wire format, so a local
+[Strata](https://github.com/Niko1221/Strata) gateway (OpenAI/Anthropic-compatible on localhost)
+and a local Ollama are both fine, while `api.anthropic.com` / `api.openai.com` are rejected. The
+scoped pentest target is reached through a separate path and is unaffected. Set `ARTEX_OFFLINE=0`
+(or `false`/`off`/`no`) to restore the original online behavior and allow cloud providers. In
+offline mode the UI model list and the dial guard admit any local/private endpoint automatically,
+so `ARTEX_LLM_PRIVATE_ENDPOINTS` is not needed and the cloud API keys below are ignored.
+
+What offline mode does with the agents' traffic:
+
+- **Local addresses only where no target gate decides.** WebFetch and the custom HTTP tool with
+  the gate off, the recording proxy, and the SOCKS5/transparent relays reach local addresses
+  only (`OFFLINE_EGRESS_BLOCKED`).
+- **Other third-party services are off.** Web search is off, and remote MCP servers, cloud
+  archive stores and non-local egress proxies are refused.
+- **Package installs are refused.** `pip`/`apt`/`npm`/`go install`… in agent shells are refused
+  with a pointer to the new `list_tools` tool, which lists the installed command-line tools. Set
+  `ARTEX_DENY_INSTALLS=0` to allow them, e.g. when a local mirror serves installs.
+- **Closed networks on public ranges.** List the ranges in `ARTEX_OFFLINE_ALLOW_CIDRS` so they
+  count as local.
+
+A tool that ignores the proxy variables can only be stopped by the network. For that, add the
+offline overlay, which applies an egress firewall inside the container:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.offline.yml up -d
+```
+
+With the overlay, only loopback, private ranges and `ARTEX_OFFLINE_ALLOW_CIDRS` are reachable
+from the container. If the firewall cannot be applied, the container does not start. See
+`docs/offline-toolbox.md` §6.4.
+
+**Offline knowledge search** (`ARTEX_KNOWLEDGE`, on by default): the local substitute for the
+web search that offline mode refuses. Import a signed knowledge pack (ExploitDB, NVD, technique
+docs) and the agent gets `search_exploits`, `lookup_cve`, `lookup_software`, `search_technique`,
+`read_knowledge` and `copy_knowledge_file` — every result carries a source citation. Build a
+pack on an online machine and import it offline:
+
+```bash
+# Online: make a signing key once, then build a signed pack from your data mirrors
+go run ./cmd/artex-knowledge keygen -out signing
+go run ./cmd/artex-knowledge build -key signing.key -key-id artex-kb-1 \
+    -pack-id artex-core -version "$(date +%Y.%m.%d)" -out pack.tar.gz \
+    -exploitdb ./exploitdb -nvd ./nvd-2.0 -docs ./techniques
+
+# Offline: trust the key (paste into knowledge/keys.go, or set the env vars), then import
+#   ARTEX_KNOWLEDGE_PUBKEY=<base64 from keygen>  ARTEX_KNOWLEDGE_KEY_ID=artex-kb-1
+# UI: System → Knowledge, or:
+curl -X POST "http://127.0.0.1:8787/api/knowledge/import?path=inbox/pack.tar.gz" -H "Authorization: Bearer $TOKEN"
+```
+
+The pack is a trust boundary: its ed25519 signature is checked before anything is read, then
+every file against the hash in the manifest. Search is lexical by default (Postgres full-text +
+trigram). For **hybrid search** (semantic vector ranking fused with lexical), point it at a
+local embedding model and use a pgvector Postgres image:
+
+```bash
+ARTEX_KNOWLEDGE_EMBED_MODEL=nomic-embed-text
+ARTEX_KNOWLEDGE_EMBED_ENDPOINT=http://host.docker.internal:11434   # Ollama; must be local offline
+# and swap the postgres image for pgvector/pgvector:pg16 (see docker-compose.yml)
+```
+
+The endpoint must actually serve embeddings. A chat-only local gateway such as **Strata**
+(great for the planner/worker LLM, but it exposes chat/completions and Anthropic messages, not
+`/v1/embeddings`) can't provide the vectors — run a dedicated local embedder like Ollama for the
+embedding model, even when Strata is your chat LLM. The vector index builds in the background
+after import; without pgvector or an embedding model, search stays lexical. See
+`docs/offline-knowledge-search.md`.
+
+Local-LLM examples (offline mode):
+
+```bash
+# Ollama (keyless, local)
+ARTEX_LLM_PROVIDER=ollama
+ARTEX_LLM_BASE_URL=http://host.docker.internal:11434   # or http://127.0.0.1:11434 when running natively
+
+# Strata or another local OpenAI-compatible gateway on localhost
+ARTEX_LLM_PROVIDER=openai
+ARTEX_LLM_BASE_URL=http://host.docker.internal:8787/v1
+```
+
+**LLM** (online mode, `ARTEX_OFFLINE=0`): `export ANTHROPIC_API_KEY=sk-...` (or `OPENAI_API_KEY`),
+or configure it in the UI's "LLM Configuration" page, which can also add a local Ollama server as a
+keyless provider (format "Ollama", default base URL `http://127.0.0.1:11434/v1`). Optional:
 `ARTEX_LLM_PROVIDER` (`anthropic | openai | openai-responses | ollama | bedrock-gateway`), `ARTEX_LLM_MODEL`,
 `ARTEX_LLM_BASE_URL`, `ARTEX_LLM_PROXY`.
 

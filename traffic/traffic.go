@@ -32,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/artex/traffic/rewrite"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -352,7 +353,12 @@ func Open(dir, addr string) (*Traffic, error) {
 	// a direct dial. When a global egress proxy IS configured (SetUpstreamProxy),
 	// every captured request — intercepted AND transparently tunneled — is
 	// forwarded through it instead, so no host leaks the real source IP.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return t.upstream.Load(), nil })
+	//
+	// Every upstream connection — a CONNECT tunnel, an intercepted request, a
+	// websocket — asks this function first, so it is also where offline mode
+	// refuses a non-local destination (offline.go). The request-time check in
+	// Requestheaders answers most refusals with a readable 403 before this runs.
+	p.SetUpstreamProxy(t.upstreamFor)
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
@@ -544,6 +550,10 @@ func ValidateProxyURL(raw string) (*url.URL, error) {
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("proxy %q is missing a host", raw)
+	}
+	// Offline mode: a proxy that is not local would carry the traffic out.
+	if err := offline.CheckURLLocal("egress proxy", u.Scheme+"://"+u.Host); err != nil {
+		return nil, err
 	}
 	return u, nil
 }

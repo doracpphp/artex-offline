@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Autumn-27/artex/offline"
 )
 
 // allowLocalTargets decides whether delivering messages to loopback / link-local
@@ -77,7 +79,16 @@ func isBlockedDialIP(ip net.IP) bool {
 // validation time but to an intranet IP at connection time) and redirects
 // (cross-host redirects are already refused, but a same-host redirect can still
 // point the path elsewhere).
-func blockInternalDial(_, address string, _ syscall.RawConn) error {
+func blockInternalDial(network, address string, c syscall.RawConn) error {
+	// Offline / local-LLM-only mode inverts this policy: in an offline
+	// environment the only legitimate delivery targets are local (a LAN mail
+	// relay, a local webhook), so a push to a public IM / mail service is
+	// refused. offline.GuardDial allows loopback and private (RFC1918 / ULA)
+	// addresses only; link-local — including the cloud metadata endpoint
+	// 169.254.169.254 — stays blocked, so the SSRF protection is preserved.
+	if offline.Enabled() {
+		return offline.GuardDial(network, address, c)
+	}
 	if allowLocalTargets() {
 		return nil
 	}

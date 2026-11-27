@@ -340,8 +340,29 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				}
 			}
 		}
+		// Knowledge search: drop the knowledge tools when no pack is active, so an
+		// agent's catalog is not cluttered with tools that would only report "no
+		// pack imported". They are re-added automatically once a pack is imported.
+		if !agent.KnowledgeAvailable() {
+			out = dropTools(out, agent.KnowledgeToolNames)
+		}
 		return out
 	})
+}
+
+// dropTools removes the named tools from a list, preserving order.
+func dropTools(tools []actool.CoreTool, names []string) []actool.CoreTool {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := tools[:0:0]
+	for _, t := range tools {
+		if !drop[t.Name()] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func contains(ss []string, v string) bool {
@@ -369,6 +390,7 @@ func buildDomainReg(as *db.AssetStore) map[string]actool.CoreTool {
 	}
 	serverTS := agent.NewToolSet(nil, "")
 	serverTS.SetAssetStore(as, as.Companies())
+	serverTS.ApplyKnowledge() // knowledge tools injected for auto/custom agents too
 	reg := make(map[string]actool.CoreTool)
 	for _, t := range serverTS.AllDomainTools() {
 		reg[t.Name()] = t

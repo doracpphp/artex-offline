@@ -827,6 +827,7 @@
   "Each request is decided on its own; one that cannot be decided stays pending and is listed.": "每个请求独立决策；无法完成决策的请求将保持待处理状态并列出。",
   "Earlier history": "更早历史",
   "earlier Q&A summarized": "含早期问答摘要",
+  "Egress firewall is not enforced: tools in agent shells that ignore the proxy settings can reach any network the host routes to.": "出站防火墙未生效：Agent shell 中忽略代理设置的工具可以访问主机可路由到的任何网络。",
   "Edit": "编辑",
   "Edit {key}": "编辑 {key}",
   "Edit asset interception rule": "编辑资产拦截规则",

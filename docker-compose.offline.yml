@@ -1,0 +1,34 @@
+# Offline overlay: egress firewall for the ARTEX container (docs/offline-toolbox.md §6.4).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.offline.yml up -d
+#
+# Offline mode already refuses ARTEX's own third-party connections in Go, and
+# refuses agent connections that go through ARTEX (WebFetch, the recording
+# proxy, ...). What Go cannot stop is a tool in an agent shell that ignores the
+# proxy variables and connects directly. This overlay closes that gap: start.sh
+# applies an iptables egress firewall in the container's network namespace
+# before the server starts (offline-firewall.sh).
+#
+#   allowed:  loopback, replies to inbound connections (the published ports),
+#             RFC1918 / ULA private ranges, ARTEX_OFFLINE_ALLOW_CIDRS
+#   rejected: everything else, link-local / cloud metadata included
+#
+# LAN targets, Postgres, and a local LLM on the host or the LAN stay reachable.
+# An `internal: true` network is deliberately not used: it would cut off LAN
+# targets and the published UI port too.
+#
+# NET_ADMIN is needed only to install the rules. The agents' processes run as an
+# unprivileged uid with no-new-privileges and hold no capabilities, so they
+# cannot change them. If the rules cannot be applied, the container does not
+# start (fail closed); ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED=1 starts it anyway
+# and the web UI shows a banner.
+#
+# Not for online use: ARTEX_OFFLINE=0 makes start.sh skip the firewall, since
+# online targets can be anywhere.
+services:
+  artex:
+    cap_add:
+      - NET_ADMIN
+    environment:
+      ARTEX_OFFLINE_FIREWALL: "1"
+      ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED: ${ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED:-}

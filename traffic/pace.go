@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/Autumn-27/artex/egress"
@@ -33,6 +34,17 @@ func (s *sink) Requestheaders(f *mproxy.Flow) {
 	}
 	f.Request.Header.Del("Proxy-Authorization")
 	if f.Request.Method == http.MethodConnect || f.Request.URL == nil {
+		return
+	}
+	// Offline mode: answer a request to a non-local destination here with a
+	// readable 403 rather than let the upstream dial fail with a bare 502. An
+	// early response skips the upstream and is not recorded as target traffic.
+	var upstream *url.URL
+	if s.t != nil {
+		upstream = s.t.upstream.Load()
+	}
+	if err := offlineCheck(f.Request.URL.Host, upstream); err != nil {
+		f.Response = offlineResponse(err)
 		return
 	}
 	if _, marked := s.paced.Load(id); marked {
