@@ -19,11 +19,13 @@ BIN=./artex
 
 MAX_DELAY=60
 
-# Offline egress firewall (docker-compose.offline.yml, docs/offline-toolbox.md §6.4).
-# Applied once, as root, before artex starts; the rules stay in the container's
-# network namespace across restarts of the child below. A failure stops the start
-# (fail closed) unless ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED is set, in which case
-# the server starts and reports the degraded state (GET /api/health, UI banner).
+# Offline egress firewall (docs/offline-toolbox.md §6.4). docker-compose.yml turns
+# it on by default (ARTEX_OFFLINE_FIREWALL=1); it applies only while offline mode
+# is on. Applied once, as root, before artex starts; the rules stay in the
+# container's network namespace across restarts of the child below. A failure
+# stops the start (fail closed) unless ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED is
+# set, in which case the server starts and reports the degraded state
+# (GET /api/health, UI banner).
 is_true() {
 	case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in
 		1 | true | on | yes) return 0 ;;
@@ -41,7 +43,7 @@ rm -f "$FW_STATUS" 2>/dev/null || true
 if is_true "${ARTEX_OFFLINE_FIREWALL:-}"; then
 	if is_false "${ARTEX_OFFLINE:-}"; then
 		# Online mode must reach arbitrary targets; the firewall would break that.
-		echo "[artex] ARTEX_OFFLINE_FIREWALL is set but offline mode is off (ARTEX_OFFLINE=${ARTEX_OFFLINE}); the egress firewall is not applied" >&2
+		echo "[artex] offline mode is off (ARTEX_OFFLINE=${ARTEX_OFFLINE}): the egress firewall is not applied"
 	elif ! sh ./offline-firewall.sh; then
 		if is_true "${ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED:-}"; then
 			echo "[artex] WARNING: egress firewall NOT applied; starting degraded (ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED)" >&2
@@ -68,9 +70,19 @@ forward() {
 }
 trap forward INT TERM
 
+# NET_ADMIN is needed only to install the egress firewall above. When running as
+# root, drop it from the bounding set before starting artex, so neither the
+# server nor anything it starts (agent processes, even a root one under the
+# development no-isolation escape) can change or flush the rules afterwards.
+LAUNCH=""
+if [ "$(id -u 2>/dev/null)" = "0" ] && command -v setpriv >/dev/null 2>&1 &&
+	setpriv --inh-caps=-net_admin --bounding-set=-net_admin true >/dev/null 2>&1; then
+	LAUNCH="setpriv --inh-caps=-net_admin --bounding-set=-net_admin"
+fi
+
 delay=1
 while :; do
-	"$BIN" "$@" &
+	$LAUNCH "$BIN" "$@" &
 	child=$!
 
 	# A signal interrupts wait and makes it return >128. At that point the child is still shutting down gracefully;

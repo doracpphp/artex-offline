@@ -308,8 +308,8 @@ COPY --from=build /out/artex /app/artex
 # to artex — docker stop only signals PID 1; without forwarding, artex never receives it,
 # cannot shut down gracefully, and is hard-killed by SIGKILL after 10 seconds.
 COPY start.sh /app/start.sh
-# Egress firewall of the offline overlay; start.sh runs it as root when
-# ARTEX_OFFLINE_FIREWALL is on (docker-compose.offline.yml).
+# Egress firewall of offline mode; start.sh runs it as root when
+# ARTEX_OFFLINE_FIREWALL is on (the docker-compose default).
 COPY offline-firewall.sh /app/offline-firewall.sh
 # Build-time tool inventory for list_tools: versions come from the pins and from
 # dpkg, so no tool is executed to list it at runtime.

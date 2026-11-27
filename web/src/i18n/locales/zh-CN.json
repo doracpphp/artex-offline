@@ -828,6 +828,7 @@
   "Earlier history": "更早历史",
   "earlier Q&A summarized": "含早期问答摘要",
   "Egress firewall is not enforced: tools in agent shells that ignore the proxy settings can reach any network the host routes to.": "出站防火墙未生效：Agent shell 中忽略代理设置的工具可以访问主机可路由到的任何网络。",
+  "No egress firewall in this container: tools in agent shells that ignore the proxy settings can reach any network the host routes to.": "此容器中没有出站防火墙：Agent shell 中忽略代理设置的工具可以访问主机可路由到的任何网络。",
   "Edit": "编辑",
   "Edit {key}": "编辑 {key}",
   "Edit asset interception rule": "编辑资产拦截规则",
