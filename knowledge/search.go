@@ -352,9 +352,9 @@ LIMIT 1`, ref, chunk).Scan(&packID, &sourcePath, &title, &body, &total)
 	if err != nil {
 		return KnowledgeChunk{}, false, err
 	}
-	if len(body) > s.cfg.MaxChunkBytes {
-		body = body[:s.cfg.MaxChunkBytes]
-	}
+	// Chunks are cut at this size when imported, but the setting can be lowered
+	// later: cut at a rune boundary so multi-byte text stays valid.
+	body = truncateUTF8(body, s.cfg.MaxChunkBytes)
 	return KnowledgeChunk{
 		Title: title.String, Path: sourcePath.String, Chunk: chunk, TotalChunks: total,
 		Text: body, Source: source(packID, sourcePath.String, chunk),

@@ -5,6 +5,16 @@ import (
 	"strings"
 )
 
+// truncateUTF8 returns s cut to at most max bytes without splitting a
+// multi-byte character (a byte slice at max could end mid-rune and hand the
+// model invalid UTF-8).
+func truncateUTF8(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return string(trimPartialRune([]byte(s[:max])))
+}
+
 // source builds the citation string a tool returns: "pack-id:path" or
 // "pack-id:path:chunk" (chunk omitted when 0), or just "pack-id" when path is
 // empty. The model copies it into a finding's evidence.
