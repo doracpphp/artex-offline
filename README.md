@@ -1,14 +1,19 @@
 <div align="center">
 
-<img src="web/public/logo.svg" width="84" alt="ARTEX logo" />
+<img src="web/public/logo.svg" width="84" alt="ARTEX Offline logo" />
 
-# ARTEX
+# ARTEX Offline
 
-**Autonomous penetration testing that keeps its receipts.**
+**Autonomous penetration testing that keeps its receipts — built for air-gapped, offline use.**
 
 
 Self-hosted multi-agent offensive security. A planner explores, workers run real tools,
 and every finding stays bound to the assets and HTTP traffic that prove it.
+
+> **ARTEX Offline** is a fork of [ARTEX](https://github.com/BaaRai/ARTEX) focused on running in
+> closed / air-gapped environments: a local LLM only, no third-party egress, and a local
+> knowledge base (ExploitDB / NVD / technique docs) that replaces web search. It is licensed
+> under the AGPL-3.0, same as upstream — see [`NOTICE`](NOTICE) for attribution.
 
 [![Release](https://img.shields.io/github/v/release/BaaRai/ARTEX?label=release&color=6b34db)](https://github.com/BaaRai/ARTEX/releases)
 [![License](https://img.shields.io/github/license/BaaRai/ARTEX?color=6b34db)](LICENSE)
