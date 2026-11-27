@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/llmpool"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/llmpool"
 )
 
 func TestHealthSyncLoopWritesLatest(t *testing.T) {

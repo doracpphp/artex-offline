@@ -27,7 +27,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Autumn-27/artex/intercept"
+	"github.com/doracpphp/artex-offline/intercept"
 )
 
 // Profile is one noise level. The zero Profile is off. Later levers (scanner

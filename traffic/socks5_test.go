@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/intercept"
+	"github.com/doracpphp/artex-offline/egress"
+	"github.com/doracpphp/artex-offline/intercept"
 )
 
 func startEchoServer(t *testing.T, network, addr string) (net.Listener, *atomic.Int32) {

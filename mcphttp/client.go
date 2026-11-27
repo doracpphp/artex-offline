@@ -24,10 +24,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 const protocolVersion = "2025-11-25"

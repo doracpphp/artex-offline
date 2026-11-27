@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // The update check is opt-in: only ARTEX_UPDATE_CHECK=1 (or true/on/yes) lets

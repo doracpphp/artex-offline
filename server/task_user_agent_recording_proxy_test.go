@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/traffic"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/egress"
+	"github.com/doracpphp/artex-offline/traffic"
 )
 
 func recordingProxyTestAddr(t *testing.T) string {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
+	"github.com/doracpphp/artex-offline/agent"
 )
 
 // The snapshot must be serializable and must not add fields. Password masking

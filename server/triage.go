@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
+	"github.com/doracpphp/artex-offline/agent"
 )
 
 // triageClient builds the advisory triage client from the configured profile, or

@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/evidence"
-	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/evidence"
+	"github.com/doracpphp/artex-offline/traffic"
 )
 
 // scriptedStep returns the assistant message and stop reason for one Complete() turn.

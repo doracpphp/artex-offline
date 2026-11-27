@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Autumn-27/artex/archivestore"
+	"github.com/doracpphp/artex-offline/archivestore"
 )
 
 func main() {

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/egress"
+	"github.com/doracpphp/artex-offline/egress"
 )
 
 // Opt-in environment flags for the Linux transparent TCP inbound listener (P4.1b).

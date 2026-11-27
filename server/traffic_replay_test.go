@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/traffic"
-	"github.com/Autumn-27/artex/traffic/rewrite"
+	"github.com/doracpphp/artex-offline/traffic"
+	"github.com/doracpphp/artex-offline/traffic/rewrite"
 )
 
 // replayServer wires a Server like ingestServer. With traffic off,

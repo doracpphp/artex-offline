@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Autumn-27/artex/agent"
-	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/agent"
+	pgdb "github.com/doracpphp/artex-offline/db"
 	"github.com/klauspost/compress/zstd"
 )
 

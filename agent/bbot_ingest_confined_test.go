@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 const bbotConfinedSecret = "TOPSECRET-bbot-ingest"

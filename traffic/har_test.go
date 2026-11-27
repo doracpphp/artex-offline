@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/traffic/rewrite"
+	"github.com/doracpphp/artex-offline/traffic/rewrite"
 )
 
 func TestHARRoundTripPlainBase64BinaryEmptyAndLargeBlob(t *testing.T) {

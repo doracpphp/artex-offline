@@ -4,8 +4,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/egress"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/egress"
 )
 
 // startupNoiseProfile is the noise profile to apply at startup: the stored

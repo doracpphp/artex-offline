@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Autumn-27/artex/knowledge"
+	"github.com/doracpphp/artex-offline/knowledge"
 )
 
 func main() {

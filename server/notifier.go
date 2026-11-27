@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/notify"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/notify"
 )
 
 // Global setting keys (stored in the settings key-value table, no dedicated table needed).

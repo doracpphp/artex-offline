@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/egress"
+	"github.com/doracpphp/artex-offline/egress"
 )
 
 const transparentRedirectChildEnv = "ARTEX_TRANSPARENT_REDIRECT_CHILD"

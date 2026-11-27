@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // Egress firewall of the offline compose overlay (docs/offline-toolbox.md §6.4).

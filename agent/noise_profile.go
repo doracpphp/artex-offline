@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/egress"
+	"github.com/doracpphp/artex-offline/egress"
 )
 
 // noiseProfileHeader starts the code-owned noise block. The block is appended to

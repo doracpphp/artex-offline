@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/agent"
+	pgdb "github.com/doracpphp/artex-offline/db"
 )
 
 // Root tests of the run-directory layout: no agent working directory is an ancestor

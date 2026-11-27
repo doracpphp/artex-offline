@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/knowledge"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/knowledge"
 )
 
 // fakeKnowledge is a KnowledgeStore double for the tool tests.

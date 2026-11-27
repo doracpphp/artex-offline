@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/doracpphp/artex-offline/llmrec"
 )
 
 // stopProvider ends every streamed call with the given stop reason and no content,

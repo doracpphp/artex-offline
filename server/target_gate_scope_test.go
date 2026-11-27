@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/guard"
-	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/guard"
+	"github.com/doracpphp/artex-offline/intercept"
 )
 
 // Target-gate wiring: every platform-owned session starts on a context that

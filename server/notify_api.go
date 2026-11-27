@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/notify"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/notify"
 )
 
 // This file is the HTTP API for the notification delivery feature. All routes are

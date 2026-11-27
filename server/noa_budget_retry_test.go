@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/norma/harness"
+	"github.com/doracpphp/artex-offline/agent"
 )
 
 // A NOA budget refusal is deterministic: the engine must not rerun the intent,
