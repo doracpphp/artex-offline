@@ -507,41 +507,50 @@ runtime supports it.
 ```
 
 **Offline / local-LLM mode** (`ARTEX_OFFLINE`, **on by default**): ARTEX runs with a local LLM
-only and blocks all third-party outbound traffic — cloud LLM APIs, the GitHub update check, and
-external notification channels (email/Telegram/DingTalk/Feishu/WeCom/webhook) are refused; only
-local destinations (loopback, LAN, RFC1918/ULA private) are reachable. Enforcement is at dial
-time, so it also defeats DNS rebinding and cross-host redirects. The restriction is **host-based,
-not format-based**: any local endpoint works regardless of wire format, so a local
-[Strata](https://github.com/Niko1221/Strata) gateway (OpenAI/Anthropic-compatible on localhost)
-and a local Ollama are both fine, while `api.anthropic.com` / `api.openai.com` are rejected. The
-scoped pentest target is reached through a separate path and is unaffected. Set `ARTEX_OFFLINE=0`
-(or `false`/`off`/`no`) to restore the original online behavior and allow cloud providers. In
-offline mode the UI model list and the dial guard admit any local/private endpoint automatically,
-so `ARTEX_LLM_PRIVATE_ENDPOINTS` is not needed and the cloud API keys below are ignored.
+only. ARTEX's own third-party connections are refused — cloud LLM APIs, the GitHub update
+check, external notification channels (email/Telegram/DingTalk/Feishu/WeCom/webhook), web
+search, remote MCP servers, cloud archive stores and egress proxies. The check is made at dial
+time on the resolved address, so it also defeats DNS rebinding and cross-host redirects. The
+restriction is **host-based, not format-based**: any local endpoint works regardless of wire
+format, so a local [Strata](https://github.com/Niko1221/Strata) gateway (OpenAI/Anthropic-
+compatible on localhost) and a local Ollama are both fine, while `api.anthropic.com` /
+`api.openai.com` are rejected. Set `ARTEX_OFFLINE=0` (or `false`/`off`/`no`) to restore the
+original online behavior and allow cloud providers. In offline mode the UI model list admits
+any local/private endpoint automatically, so `ARTEX_LLM_PRIVATE_ENDPOINTS` is not needed and
+the cloud API keys below are ignored.
+
+"Local" means loopback, RFC1918 and IPv6 ULA ranges, plus whatever you list in
+`ARTEX_OFFLINE_ALLOW_CIDRS` (for closed networks that use public ranges internally). Cloud
+metadata endpoints are never local. This one rule is the authority everywhere: the Go gates and
+the egress firewall below apply the same set, and the per-task target gate can only narrow it —
+approving a public host does not open a route to it. In particular, **pentest targets on public
+addresses must be listed in `ARTEX_OFFLINE_ALLOW_CIDRS`**.
 
 What offline mode does with the agents' traffic:
 
-- **Local addresses only where no target gate decides.** WebFetch and the custom HTTP tool with
-  the gate off, the recording proxy, and the SOCKS5/transparent relays reach local addresses
-  only (`OFFLINE_EGRESS_BLOCKED`).
-- **Other third-party services are off.** Web search is off, and remote MCP servers, cloud
-  archive stores and non-local egress proxies are refused.
+- **Local addresses only, on every path ARTEX controls.** WebFetch, enrichment, the custom HTTP
+  tool, the recording proxy and the SOCKS5/transparent relays reach local or allow-listed
+  addresses only (`OFFLINE_EGRESS_BLOCKED`), with or without a target gate.
+- **No proxies.** The global egress proxy, the custom HTTP tool's own proxy and the LLM proxy
+  are refused: a proxy, even on the LAN, forwards to any destination.
 - **Package installs are refused.** `pip`/`apt`/`npm`/`go install`… in agent shells are refused
   with a pointer to the new `list_tools` tool, which lists the installed command-line tools. Set
   `ARTEX_DENY_INSTALLS=0` to allow them, e.g. when a local mirror serves installs.
-- **Closed networks on public ranges.** List the ranges in `ARTEX_OFFLINE_ALLOW_CIDRS` so they
-  count as local.
 
-A tool that ignores the proxy variables can only be stopped by the network. For that, add the
-offline overlay, which applies an egress firewall inside the container:
+**Egress firewall (on by default with docker compose).** A tool in an agent shell that connects
+directly (ignoring the proxy variables) can only be stopped by the network. `docker-compose.yml`
+grants `NET_ADMIN` and sets `ARTEX_OFFLINE_FIREWALL=1`, so `start.sh` installs iptables rules in
+the container before ARTEX starts and then drops `NET_ADMIN`; only loopback, private ranges and
+`ARTEX_OFFLINE_ALLOW_CIDRS` are reachable from the container. If the rules cannot be applied the
+container does not start (set `ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED=1` to start anyway, with a
+banner). Running without the firewall (a native binary, or `ARTEX_OFFLINE_FIREWALL=0`) shows a
+persistent banner; if you enforce egress outside the container, say so with
+`ARTEX_EGRESS_FIREWALL_EXTERNAL=1`.
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.offline.yml up -d
-```
-
-With the overlay, only loopback, private ranges and `ARTEX_OFFLINE_ALLOW_CIDRS` are reachable
-from the container. If the firewall cannot be applied, the container does not start. See
-`docs/offline-toolbox.md` §6.4.
+What the firewall does not cover: DNS lookups of public names (Docker's resolver forwards them
+from the host, so a DNS-tunnelling tool could leak small amounts of data), a relay on an allowed
+range that forwards onward (a LAN proxy, a service on the host), and other containers. For a
+hard air gap, also block egress at the host or network edge. See `docs/offline-toolbox.md` §6.4.
 
 **Offline knowledge search** (`ARTEX_KNOWLEDGE`, on by default): the local substitute for the
 web search that offline mode refuses. Import a signed knowledge pack (ExploitDB, NVD, technique

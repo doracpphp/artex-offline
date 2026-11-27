@@ -37,6 +37,13 @@ services:
     # or file capability may raise them back to root.
     security_opt:
       - "no-new-privileges:true"
+    # Egress firewall of offline mode (offline-firewall.sh, docs/offline-toolbox.md
+    # §6.4). NET_ADMIN is used once, by start.sh as root, to install iptables rules
+    # in this container's network namespace; start.sh then drops it from the
+    # bounding set before artex starts, so neither the server nor an agent can
+    # change the rules. With ARTEX_OFFLINE=0 no rules are applied.
+    cap_add:
+      - NET_ADMIN
     # host.docker.internal is how the container reaches a local LLM (Ollama, a
     # Strata gateway) on the host. Docker Desktop defines it; Linux Docker Engine
     # needs this mapping.
@@ -50,12 +57,21 @@ services:
       # .env.example). Without this line the .env value never reached the
       # container, so ARTEX_OFFLINE=0 had no effect under Docker.
       ARTEX_OFFLINE: ${ARTEX_OFFLINE:-}
-      # Extra ranges offline mode treats as local (closed networks on public ranges).
+      # Egress firewall: on by default while offline mode is on. If it cannot be
+      # applied the container does not start (fail closed), unless
+      # ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED=1 (then the UI shows a banner).
+      ARTEX_OFFLINE_FIREWALL: ${ARTEX_OFFLINE_FIREWALL:-1}
+      ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED: ${ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED:-}
+      ARTEX_EGRESS_FIREWALL_EXTERNAL: ${ARTEX_EGRESS_FIREWALL_EXTERNAL:-}
+      # Extra ranges offline mode treats as local (closed networks on public
+      # ranges). The single authority for non-local reach: Go gates and the
+      # firewall both use it. IP/CIDR literals only.
       ARTEX_OFFLINE_ALLOW_CIDRS: ${ARTEX_OFFLINE_ALLOW_CIDRS:-}
       # Offline refusal of package installs in agent shells: on unless set to 0.
       ARTEX_DENY_INSTALLS: ${ARTEX_DENY_INSTALLS:-}
-      # Offline knowledge search: on unless set to 0; a signed pack is imported in
-      # the UI. ARTEX_KNOWLEDGE_PUBKEY/KEY_ID trust a key before one is embedded.
+      # Offline knowledge search: on unless set to 0; a signed pack is imported
+      # with POST /api/knowledge/import (docs/offline-knowledge-search.md).
+      # ARTEX_KNOWLEDGE_PUBKEY/KEY_ID add a trusted signing key.
       ARTEX_KNOWLEDGE: ${ARTEX_KNOWLEDGE:-}
       ARTEX_KNOWLEDGE_PUBKEY: ${ARTEX_KNOWLEDGE_PUBKEY:-}
       ARTEX_KNOWLEDGE_KEY_ID: ${ARTEX_KNOWLEDGE_KEY_ID:-}

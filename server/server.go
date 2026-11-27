@@ -1132,7 +1132,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.isolation.Mode != "" {
 		out["isolation"] = s.isolation
 	}
-	// Offline overlay only: "degraded" shows a banner like a degraded isolation.
+	// Offline mode only: "absent" / "degraded" show a banner like a degraded isolation.
 	if fw, ok := egressFirewallStatus(); ok {
 		out["egress_firewall"] = fw
 	}

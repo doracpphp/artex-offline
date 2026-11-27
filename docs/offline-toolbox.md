@@ -235,9 +235,9 @@ The only way to reliably stop downloads is **to make it impossible for the conta
 runs the tools to reach anything but local networks**. Not command refusal, not GuardDial:
 this is the real boundary.
 
-- **Current gap**: `docker-compose.yml` has no network isolation (no `networks:`
-  definitions, no iptables/firewall). The container can reach outside through the default
-  bridge.
+- **Gap without a firewall**: a container on the default bridge can reach outside. Before
+  this fork, `docker-compose.yml` had no network isolation (no `networks:` definitions, no
+  iptables/firewall).
 - **Destinations needed when offline**: ARTEX needs to reach the local LLM (on the host or
   the LAN), Postgres, and the targets, which are on the LAN in an offline setup. The general
   internet is not needed.
@@ -249,36 +249,57 @@ this is the real boundary.
     internal network, so the web UI (8787) and the proxy port (8788) become unreachable from
     the host.
   - **Host LLM**: reaching an LLM on the host through `host.docker.internal` is not
-    dependable there (and on Linux it needs `extra_hosts: host-gateway`, which the compose
-    file does not set).
-- **Countermeasure (offline-only overlay)**: Add `docker-compose.offline.yml`, which turns
-  on an **egress firewall inside the ARTEX container's network namespace**.
-  - **Rule set**: allow loopback, RFC1918 / ULA private ranges (the same set as
-    `offline.IsLocalIP`) and the operator's `ARTEX_OFFLINE_ALLOW_CIDRS`; drop everything
-    else, including link-local (cloud metadata). This keeps Postgres, the LLM, LAN targets and
-    the published ports working.
+    dependable there (on Linux it needs `extra_hosts: host-gateway`, which the compose files
+    now set).
+- **Countermeasure (default with docker compose)**: an **egress firewall inside the ARTEX
+  container's network namespace** (`offline-firewall.sh`). `docker-compose.yml` (and
+  `docker-compose.ghcr.yml`) set `ARTEX_OFFLINE_FIREWALL=1` and `cap_add: [NET_ADMIN]`; the
+  rules apply only while offline mode is on.
+  - **Rule set**: reject the cloud metadata endpoints first (`169.254.169.254`,
+    `fd00:ec2::254`, `100.100.100.200` — the same list as `offline.AllowedAddr`), then allow
+    loopback, replies to inbound connections, RFC1918 / ULA private ranges and the operator's
+    `ARTEX_OFFLINE_ALLOW_CIDRS` (IP/CIDR literals only, so it matches what the Go gates
+    parse); reject everything else, link-local included. This keeps Postgres, the LLM, LAN
+    targets and the published ports working.
+  - **Single authority**: the Go gates use exactly the same set. A per-task target-gate
+    approval can only narrow it, never widen it, so a pentest target on a public address
+    must be listed in `ARTEX_OFFLINE_ALLOW_CIDRS`.
   - **Where it is applied**: the entrypoint (`start.sh`, still root) applies the rules on
-    every start, before the server starts. The overlay adds `cap_add: [NET_ADMIN]` for this.
-    Agent processes run as a non-root uid with `no-new-privileges`, hold no capabilities, and
-    therefore cannot change the rules. The image needs `iptables` or `nftables`, which it
-    does not install today.
+    every start, before the server starts, and then drops `NET_ADMIN` from the bounding and
+    inheritable sets (`setpriv`) before starting ARTEX. Neither the server nor any agent
+    process — not even a root one under the development `-dev-insecure-no-isolation`
+    escape — can change or flush the rules afterwards. Agent processes additionally run as
+    a non-root uid with `no-new-privileges`.
   - **Fail closed and visible**: in offline mode, if the rules cannot be applied, the start
-    stops, unless the operator explicitly accepts a degraded start. The server checks the
-    rule set at startup and reports it in `GET /api/health`, and the web UI shows it as a
-    banner, like the existing agent-isolation status.
-  - **Start command**: `docker compose -f docker-compose.yml -f docker-compose.offline.yml
-    up -d`.
+    stops, unless the operator sets `ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED=1`. The state is
+    reported in `GET /api/health` (`egress_firewall.mode`: `enforced`, `degraded`,
+    `absent`, or `external`) and every mode but `enforced` / `external` is shown as a
+    persistent web UI banner — including a native run or `ARTEX_OFFLINE_FIREWALL=0`, where
+    there is no firewall at all (`absent`). An operator who enforces egress outside the
+    container sets `ARTEX_EGRESS_FIREWALL_EXTERNAL=1` (reported as `external`; ARTEX cannot
+    verify it).
   - **Alternative for Linux hosts**: rules in the host's `DOCKER-USER` chain for a fixed
     compose subnet. These sit outside the container but need host root and per-host setup.
     The in-container approach also works under Docker Desktop.
+- **Residual channels (documented, not closed)**:
+  - **DNS**: names are resolved by Docker's embedded resolver, which forwards from the host.
+    The firewall stops connections, not lookups, so a tool that tunnels data over DNS can
+    leak small amounts. ARTEX does not pin a resolver; block outbound DNS at the host or
+    network edge for a hard air gap.
+  - **Relays on allowed ranges**: anything on the LAN or the host that forwards onward (a
+    forward proxy, an SSH jump host, a service on the Docker host) is reachable by design.
+    ARTEX itself refuses every configured proxy in offline mode (global, per-tool and LLM),
+    but cannot stop an agent from using such a relay directly.
+  - **Other containers** (e.g. browser MCP sidecars, a pgvector database) have their own
+    network namespaces and are not covered by this firewall.
 - **Granularity caveat**: `--network none` goes too far, cutting off Postgres/LLM/targets as
-  well. **When not offline**, ARTEX needs to reach arbitrary targets (including the
-  internet), so this isolation is **limited to the offline-only overlay**, and the default
-  compose file is not changed. The firewall only enforces "no internet"; which LAN hosts may
-  be tested is still decided by the target scope and the intercept gate.
-- **Effect**: Whatever the agent tries with `apt/pip/git clone/curl`, **the download
-  physically cannot succeed**. §6.1/§6.2 are reduced to the role of "cutting wasted turns"
-  on top of this boundary.
+  well. **When not offline** (`ARTEX_OFFLINE=0`), ARTEX needs to reach arbitrary targets
+  (including the internet), so `start.sh` skips the firewall. The firewall only enforces "no
+  internet"; which LAN hosts may be tested is still decided by the target scope and the
+  intercept gate.
+- **Effect**: Whatever the agent tries with `apt/pip/git clone/curl`, **a direct download
+  cannot succeed**. §6.1/§6.2 are reduced to the role of "cutting wasted turns" on top of
+  this boundary.
 
 ## 7. Configuration
 
@@ -290,7 +311,10 @@ Follow the existing conventions: deployment switches are environment variables (
 | --- | --- | --- |
 | `ARTEX_TOOLBOX_DIR` | Environment | `/opt/toolbox` (toolbox images and tool packs; read-only to agents) |
 | `ARTEX_DENY_INSTALLS` | Environment | On while offline mode is on; set `0` when a local package mirror (option 3) is used |
-| `ARTEX_OFFLINE_ALLOW_CIDRS` | Environment | Empty; extra ranges for the egress firewall (§6.4), shared with the knowledge search gates |
+| `ARTEX_OFFLINE_ALLOW_CIDRS` | Environment | Empty; extra IP/CIDR ranges offline mode treats as local — the single authority for the Go gates and the egress firewall (§6.4) |
+| `ARTEX_OFFLINE_FIREWALL` | Environment | `1` in the compose files (applies only while offline mode is on); `0` turns the firewall off (banner) |
+| `ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED` | Environment | Empty; `1` starts the container even if the rules cannot be applied (banner) |
+| `ARTEX_EGRESS_FIREWALL_EXTERNAL` | Environment | Empty; `1` declares that egress is enforced outside the container (no banner) |
 
 - `ARTEX_DENY_INSTALLS` enables the automatic refusal in §6.2.
 - `list_tools` reads the build-time inventory plus the manifests under `ARTEX_TOOLBOX_DIR`.
@@ -304,8 +328,8 @@ Follow the existing conventions: deployment switches are environment variables (
 
 **Status (2026-11-27)**: Phase 1 is implemented.
 
-- **Egress firewall**: `offline-firewall.sh`, `start.sh`, `docker-compose.offline.yml`;
-  `iptables` added to the image. The state is reported in `GET /api/health` and shown as a
+- **Egress firewall**: `offline-firewall.sh`, `start.sh`, on by default in `docker-compose.yml`;
+  `iptables` added to the image; `NET_ADMIN` dropped before ARTEX starts. The state is reported in `GET /api/health` and shown as a
   web UI banner.
 - **`list_tools`** (`agent/listtools.go`):
   - It reads the build-time inventory that `scripts/tool-inventory.sh` writes.
@@ -324,7 +348,7 @@ Follow the existing conventions: deployment switches are environment variables (
   - Without NET_ADMIN the start is refused, and `ALLOW_DEGRADED` overrides that.
   - `ARTEX_OFFLINE=0` skips the firewall.
 
-1. **Phase 1**: Egress firewall via `docker-compose.offline.yml` (§6.4, the true last line
+1. **Phase 1**: Egress firewall, on by default in the compose files (§6.4, the true last line
    of defense, with the health/banner report), `list_tools` built from the build-time
    inventory (option 5), and the code-owned offline install refusal (§6.2). Takes effect with
    the existing image plus `iptables`/`nftables`.

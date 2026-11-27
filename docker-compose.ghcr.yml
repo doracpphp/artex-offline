@@ -34,10 +34,29 @@ services:
     # or file capability may raise them back to root.
     security_opt:
       - "no-new-privileges:true"
+    # Egress firewall of offline mode; see docker-compose.yml for the details.
+    cap_add:
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
+      # Offline mode and its egress firewall: both on by default (docker-compose.yml
+      # and .env.example explain each variable).
+      ARTEX_OFFLINE: ${ARTEX_OFFLINE:-}
+      ARTEX_OFFLINE_FIREWALL: ${ARTEX_OFFLINE_FIREWALL:-1}
+      ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED: ${ARTEX_OFFLINE_FIREWALL_ALLOW_DEGRADED:-}
+      ARTEX_EGRESS_FIREWALL_EXTERNAL: ${ARTEX_EGRESS_FIREWALL_EXTERNAL:-}
+      ARTEX_OFFLINE_ALLOW_CIDRS: ${ARTEX_OFFLINE_ALLOW_CIDRS:-}
+      ARTEX_DENY_INSTALLS: ${ARTEX_DENY_INSTALLS:-}
+      ARTEX_KNOWLEDGE: ${ARTEX_KNOWLEDGE:-}
+      ARTEX_KNOWLEDGE_PUBKEY: ${ARTEX_KNOWLEDGE_PUBKEY:-}
+      ARTEX_KNOWLEDGE_KEY_ID: ${ARTEX_KNOWLEDGE_KEY_ID:-}
+      ARTEX_KNOWLEDGE_EMBED_PROVIDER: ${ARTEX_KNOWLEDGE_EMBED_PROVIDER:-}
+      ARTEX_KNOWLEDGE_EMBED_MODEL: ${ARTEX_KNOWLEDGE_EMBED_MODEL:-}
+      ARTEX_KNOWLEDGE_EMBED_ENDPOINT: ${ARTEX_KNOWLEDGE_EMBED_ENDPOINT:-}
       # Parts, not a pasted URL. PostgresDSN percent-encodes the password, so a
       # value with / ? % @ : or a space still connects.
       ARTEX_PG_HOST: postgres
