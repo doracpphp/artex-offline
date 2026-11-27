@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +39,29 @@ func TestIsBlockedModelAddrOfflineInversion(t *testing.T) {
 		if !s.isBlockedModelAddr(addr, true) {
 			t.Errorf("offline: non-local model host %s must be refused even with allowPrivate", s4)
 		}
+	}
+}
+
+// In offline mode the http tool's own proxy is refused (any proxy, LAN ones
+// included, forwards to any destination); the transport fails every dial with
+// an offline refusal instead of contacting the proxy.
+func TestHTTPToolProxyRefusedOffline(t *testing.T) {
+	t.Setenv("ARTEX_OFFLINE", "1")
+	s := &Server{}
+	for _, p := range []string{"http://10.0.0.5:3128", "http://127.0.0.1:8080"} {
+		tr := s.httpProxyTransport(httpExec{Proxy: p})
+		if tr == nil || tr.DialContext == nil {
+			t.Fatalf("%s: want a refusing transport, got %#v", p, tr)
+		}
+		if tr.Proxy != nil {
+			t.Errorf("%s: the refusing transport must not use the proxy", p)
+		}
+		if _, err := tr.DialContext(t.Context(), "tcp", "10.0.0.5:3128"); err == nil || !strings.Contains(err.Error(), "offline mode") {
+			t.Errorf("%s: dial must be refused with an offline message, got %v", p, err)
+		}
+	}
+	t.Setenv("ARTEX_OFFLINE", "0")
+	if tr := s.httpProxyTransport(httpExec{Proxy: "http://10.0.0.5:3128"}); tr == nil || tr.Proxy == nil {
+		t.Error("offline off: the per-tool proxy must be used as before")
 	}
 }

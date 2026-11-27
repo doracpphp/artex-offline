@@ -34,6 +34,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -73,6 +74,9 @@ func IsLocalIP(ip net.IP) bool {
 	// check, otherwise it bypasses it.
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
+	}
+	if a, ok := netip.AddrFromSlice(ip); ok && IsMetadataAddr(a) {
+		return false // fd00:ec2::254 is ULA (IsPrivate) but is a metadata endpoint
 	}
 	return ip.IsLoopback() || ip.IsPrivate()
 }

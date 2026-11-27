@@ -38,6 +38,7 @@ func offlineOn(t *testing.T) {
 		"localhost":      {"127.0.0.1"},
 		"pypi.example":   {"203.0.113.30"},
 		"github.example": {"203.0.113.31"},
+		"mixed.example":  {"10.0.0.8", "203.0.113.32"},
 	}
 	t.Cleanup(func() { offline.Resolver = prev })
 }
@@ -118,11 +119,16 @@ func TestOfflineCheck(t *testing.T) {
 	if err := offlineCheck("pypi.example:443", nil); err == nil {
 		t.Fatal("a public destination must be refused")
 	}
-	// A local destination through a public upstream proxy is refused too: the
-	// proxy would carry the connection out.
-	up, _ := ValidateProxyURL("http://127.0.0.1:3128")
-	if err := offlineCheck("localhost", up); err != nil {
-		t.Fatalf("local destination through a local proxy: %v", err)
+	// A name with a mixed local and public answer is refused, not filtered:
+	// go-mitmproxy dials the name itself after the check.
+	if err := offlineCheck("mixed.example:443", nil); err == nil {
+		t.Fatal("a name resolving to any non-local address must be refused")
+	}
+	// Any upstream proxy is refused in offline mode, even a local one: it can
+	// forward the connection anywhere.
+	up := &url.URL{Scheme: "http", Host: "127.0.0.1:3128"}
+	if err := offlineCheck("localhost", up); err == nil {
+		t.Fatal("a destination through an upstream proxy must be refused in offline mode")
 	}
 	t.Setenv(offline.Env, "0")
 	if err := offlineCheck("pypi.example:443", nil); err != nil {
@@ -132,14 +138,12 @@ func TestOfflineCheck(t *testing.T) {
 
 func TestValidateProxyURLOffline(t *testing.T) {
 	offlineOn(t)
-	for _, raw := range []string{"http://127.0.0.1:3128", "socks5://user:pw@localhost:1080"} {
-		if _, err := ValidateProxyURL(raw); err != nil {
-			t.Errorf("%s: a local proxy must be accepted: %v", raw, err)
-		}
-	}
-	for _, raw := range []string{"http://203.0.113.9:3128", "socks5://pypi.example:1080"} {
+	// Offline mode refuses every egress proxy, local ones included: a LAN
+	// forward proxy is a path to the internet past both the guards and the
+	// firewall.
+	for _, raw := range []string{"http://127.0.0.1:3128", "socks5://user:pw@localhost:1080", "http://10.0.0.5:3128", "http://203.0.113.9:3128"} {
 		if _, err := ValidateProxyURL(raw); err == nil {
-			t.Errorf("%s: a non-local proxy must be refused in offline mode", raw)
+			t.Errorf("%s: an egress proxy must be refused in offline mode", raw)
 		}
 	}
 	t.Setenv(offline.Env, "0")

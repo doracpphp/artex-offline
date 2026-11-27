@@ -25,23 +25,28 @@ const offlineLookupTimeout = 5 * time.Second
 
 // offlineCheck returns the refusal for forwarding to host (a bare host or
 // host:port) through upstream (nil = direct), or nil when offline mode is off
-// or both are local.
+// or the destination is local.
+//
+// go-mitmproxy dials the NAME itself after this check, so the check is strict:
+// every address the name resolves to must be local (offline.RequireAllAllowed);
+// a mixed local/public answer is refused rather than filtered. An upstream proxy
+// is refused outright in offline mode (traffic.ValidateProxyURL never lets one
+// be set, and this guards a stale value too). A rebinding between this lookup
+// and go-mitmproxy's own is the residual risk of a check-then-dial layer; the
+// egress firewall is the boundary (docs/offline-toolbox.md §6.4).
 func offlineCheck(host string, upstream *url.URL) error {
 	if !offline.Enabled() {
 		return nil
 	}
+	if upstream != nil {
+		return &offline.EgressError{Target: upstream.Host, Reason: "an upstream egress proxy is not allowed in offline mode"}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), offlineLookupTimeout)
 	defer cancel()
-	if upstream != nil {
-		if _, err := offline.AllowedAddrs(ctx, upstream.Hostname()); err != nil {
-			return err
-		}
-	}
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	_, err := offline.AllowedAddrs(ctx, host)
-	return err
+	return offline.RequireAllAllowed(ctx, host)
 }
 
 // upstreamFor is go-mitmproxy's upstream selector: the global egress proxy, or

@@ -12,10 +12,11 @@ import (
 )
 
 // OfflineEgressBlocked: offline mode refused an agent-initiated connection to
-// an address that is not local. It applies where no target gate decides the
-// connection: a session whose gate is off, a client built without a scope, and
-// the ungated SOCKS5 / transparent relays. A gated scope keeps the scope as the
-// authority (see docs/offline-knowledge-search.md §4.5).
+// an address that is not local (loopback, RFC1918 / ULA) or inside
+// ARTEX_OFFLINE_ALLOW_CIDRS. It applies on every agent path — gate off, no
+// scope, the SOCKS5 / transparent relays, and a gated scope, where the scope
+// can only narrow this rule, never widen it (docs/offline-knowledge-search.md
+// §4.5). The same rule is what the egress firewall enforces.
 const OfflineEgressBlocked = "OFFLINE_EGRESS_BLOCKED"
 
 type dialFunc = func(ctx context.Context, network, addr string) (net.Conn, error)

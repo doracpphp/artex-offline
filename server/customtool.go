@@ -670,9 +670,17 @@ func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
 	}
 	tr := &http.Transport{Proxy: http.ProxyURL(pu)}
 	if offline.Enabled() {
-		// Offline mode: the transport dials the proxy, which must be local; a
-		// public proxy would carry the call out. The guard checks the resolved
-		// address of each connection.
+		if caFile == "" {
+			// Offline mode refuses a per-tool (or global) proxy: the guard could
+			// only check the proxy's address, and the proxy then forwards to any
+			// destination. Only ARTEX's own recording proxy (caFile set), which
+			// checks each destination itself, is allowed.
+			refusal := fmt.Errorf("offline mode: the http tool's proxy %q is not allowed (a proxy can forward to any destination). %s", pu.Host, offline.Hint)
+			tr.Proxy = nil
+			tr.DialContext = func(context.Context, string, string) (net.Conn, error) { return nil, refusal }
+			return tr
+		}
+		// The recording proxy itself is local; pin the dial to a local address.
 		tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, Control: offline.GuardDial}).DialContext
 	}
 	if caFile != "" {

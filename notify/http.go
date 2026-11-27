@@ -80,14 +80,17 @@ func isBlockedDialIP(ip net.IP) bool {
 // (cross-host redirects are already refused, but a same-host redirect can still
 // point the path elsewhere).
 func blockInternalDial(network, address string, c syscall.RawConn) error {
-	// Offline / local-LLM-only mode inverts this policy: in an offline
-	// environment the only legitimate delivery targets are local (a LAN mail
-	// relay, a local webhook), so a push to a public IM / mail service is
-	// refused. offline.GuardDial allows loopback and private (RFC1918 / ULA)
-	// addresses only; link-local — including the cloud metadata endpoint
-	// 169.254.169.254 — stays blocked, so the SSRF protection is preserved.
+	// Offline / local-LLM-only mode ADDS a restriction on top of this policy:
+	// in an offline environment the only legitimate delivery targets are local
+	// (a LAN mail relay, a local webhook), so a push to a public IM / mail
+	// service is refused first. It then falls through to the normal checks
+	// below, so loopback still needs the ARTEX_NOTIFY_ALLOW_LOCAL opt-in (a
+	// loopback delivery plus the echoed last_error is a half-blind read of local
+	// admin ports) and link-local / metadata stay blocked.
 	if offline.Enabled() {
-		return offline.GuardDial(network, address, c)
+		if err := offline.GuardDial(network, address, c); err != nil {
+			return err
+		}
 	}
 	if allowLocalTargets() {
 		return nil

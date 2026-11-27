@@ -46,13 +46,13 @@ func TestValidateOfflineNoOpWhenDisabled(t *testing.T) {
 
 func TestQuotaAwareHTTPClientOfflineProxyGuard(t *testing.T) {
 	t.Setenv("ARTEX_OFFLINE", "1")
-	// A non-local proxy would let LLM traffic escape the dial guard.
-	if _, err := quotaAwareHTTPClient("http://proxy.example.com:8080", "", ""); err == nil {
-		t.Error("offline mode must refuse a non-local LLM proxy")
-	}
-	// A local proxy is allowed.
-	if _, err := quotaAwareHTTPClient("http://127.0.0.1:8080", "", ""); err != nil {
-		t.Errorf("offline mode must allow a local LLM proxy: %v", err)
+	// Any LLM proxy is refused in offline mode, local or not: the dial guard can
+	// only check the proxy's address, and the proxy forwards anywhere (prompts
+	// carry target data).
+	for _, p := range []string{"http://proxy.example.com:8080", "http://127.0.0.1:8080", "http://10.0.0.5:3128"} {
+		if _, err := quotaAwareHTTPClient(p, "", ""); err == nil {
+			t.Errorf("offline mode must refuse the LLM proxy %s", p)
+		}
 	}
 	// No proxy is allowed and installs the offline dial guard without error.
 	if _, err := quotaAwareHTTPClient("", "", ""); err != nil {

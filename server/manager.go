@@ -561,14 +561,13 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
 	}
-	// Offline mode: a saved proxy that is not local would carry agent traffic
-	// out (ProxyAddr hands it to agent shells while capture is off). Ignore it
-	// for this run; the stored value is kept for when offline mode is turned off.
-	if m.globalProxy != "" {
-		if err := offline.CheckURLLocal("global egress proxy", proxyWithoutCredentials(m.globalProxy)); err != nil {
-			log.Printf("[offline] global egress proxy %q ignored: %v", proxyWithoutCredentials(m.globalProxy), err)
-			m.globalProxy = ""
-		}
+	// Offline mode: any saved egress proxy is ignored for this run — a proxy,
+	// even a local one, forwards to any destination, and ProxyAddr would hand it
+	// to agent shells and WebFetch while capture is off. The stored value is
+	// kept for when offline mode is turned off.
+	if m.globalProxy != "" && offline.Enabled() {
+		log.Printf("[offline] global egress proxy %q ignored: offline mode does not allow an egress proxy", proxyWithoutCredentials(m.globalProxy))
+		m.globalProxy = ""
 	}
 	if m.traffic != nil {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
