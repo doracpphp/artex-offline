@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -32,7 +31,7 @@ type KnowledgeStore interface {
 	LookupCVE(ctx context.Context, cve string) (knowledge.CVEInfo, bool, error)
 	LookupSoftware(ctx context.Context, product, vendor, version string, limit int) ([]knowledge.SoftwareHit, error)
 	ReadKnowledge(ctx context.Context, ref string, chunk int) (knowledge.KnowledgeChunk, bool, error)
-	DocumentFilePath(ctx context.Context, ref string) (absPath, packID, sourcePath string, ok bool, err error)
+	ReadDocumentFile(ctx context.Context, ref string, maxBytes int64) (data []byte, packID, sourcePath string, ok bool, err error)
 }
 
 // SetKnowledge wires the knowledge store into this ToolSet. nil (the default)
@@ -272,16 +271,15 @@ func (t *ToolSet) runCopyKnowledgeFile(ctx context.Context, in json.RawMessage, 
 	if err := json.Unmarshal(in, &a); err != nil || strings.TrimSpace(a.Ref) == "" {
 		return actool.Errorf("ref is required"), nil
 	}
-	absPath, _, sourcePath, ok, err := t.knowledge.DocumentFilePath(ctx, a.Ref)
+	// The store opens the file confined to the active pack's directory and caps
+	// its size (knowledge.ReadDocumentFile); this tool runs with the server's
+	// identity, so it never opens a path itself.
+	data, _, sourcePath, ok, err := t.knowledge.ReadDocumentFile(ctx, a.Ref, knowledge.MaxDocumentFileBytes)
 	if err != nil {
 		return actool.Errorf("copy_knowledge_file: " + err.Error()), nil
 	}
 	if !ok {
-		return actool.Errorf("no file found for ref " + a.Ref + " (a CVE has no file; use lookup_cve)"), nil
-	}
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		return actool.Errorf("copy_knowledge_file: read pack file: " + err.Error()), nil
+		return actool.Errorf("no file found for ref " + a.Ref + " (a CVE has no file, and an exploit whose file is not in the pack has none either; use lookup_cve / read_knowledge)"), nil
 	}
 	dir := ""
 	if tc != nil {

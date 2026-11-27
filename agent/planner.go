@@ -504,7 +504,7 @@ No duplicates, no padding; but when the goal is unmet and there are uncovered, d
 
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + untrustedDataRules + artifactSpec(workDir) + noiseProfileBlock() + offlineBlock()
+	return body + untrustedDataRules + artifactSpec(workDir) + noiseProfileBlock() + offlineBlock(true)
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution

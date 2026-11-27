@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,12 +51,26 @@ func LoadConfig(dataDir string) Config {
 	return c
 }
 
-// StagingDir is where a pack extracts before it is activated, so a failed import
-// leaves the active pack untouched (docs §4.1).
-func (c Config) StagingDir() string { return filepath.Join(c.Dir, ".staging") }
+// PacksDir holds the imported packs' files: <PacksDir>/<pack_id>/<version dir>/,
+// one version directory per import (import.go). It is apart from <Dir>/inbox, so
+// no pack id can collide with the inbox.
+func (c Config) PacksDir() string { return filepath.Join(c.Dir, "packs") }
 
-// PackDir is the directory an activated pack's files live under.
-func (c Config) PackDir(packID string) string { return filepath.Join(c.Dir, packID) }
+// packFilesDir resolves a kb_packs.dir value (<pack_id>/<version dir>) to its
+// absolute directory under PacksDir. The value comes from the database, so it
+// is re-validated rather than trusted: exactly two safe segments, neither
+// starting with a dot (which also rules out "." and ".." and staging dirs).
+func (c Config) packFilesDir(rel string) (string, error) {
+	clean, err := SafePath(rel)
+	if err != nil {
+		return "", fmt.Errorf("pack directory %q: %w", rel, err)
+	}
+	segs := strings.Split(clean, "/")
+	if len(segs) != 2 || strings.HasPrefix(segs[0], ".") || strings.HasPrefix(segs[1], ".") {
+		return "", fmt.Errorf("pack directory %q is not <pack_id>/<version>", rel)
+	}
+	return filepath.Join(c.PacksDir(), segs[0], segs[1]), nil
+}
 
 func enabledDefaultOn(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {

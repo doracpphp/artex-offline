@@ -5,18 +5,25 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
-// Signing-key trust (docs §4.1). A pack's manifest.sig is checked against the
-// ed25519 public key whose id its manifest names. The recommended home for that
-// key is the binary, so an attacker with config write access cannot swap it; an
-// env override exists so a key can be trusted before one is baked in, and for
-// tests.
+// Signing-key trust (docs §4.1). A pack's manifest.sig must verify against a
+// trusted ed25519 public key, and the manifest's key_id must name that key.
+//
+// The recommended home for a key is the binary (embeddedKeys), so an attacker
+// with only config write access cannot replace it. The environment may ADD a key
+// (for trusting a key before one is embedded, and for tests), but never replace
+// an embedded one: an env key under an embedded key's id is a configuration
+// error. On top of that, the first import of a pack id pins the signing key's
+// fingerprint (store.go): a later pack of the same id signed by any other key —
+// for instance one an attacker added through the environment — is refused until
+// the operator explicitly re-pins.
 //
 // embeddedKeys maps key_id -> base64-encoded ed25519 public key. It is empty
 // until a real key is generated (cmd/artex-knowledge keygen) and pasted here,
-// which is a deliberate, reviewed change. With no embedded key and no override,
+// which is a deliberate, reviewed change. With no embedded key and no env key,
 // import refuses every pack: a pack is only as trustworthy as the key that
 // verifies it, and there is none.
 var embeddedKeys = map[string]string{
@@ -24,20 +31,28 @@ var embeddedKeys = map[string]string{
 }
 
 const (
-	// PubKeyEnv overrides/augments the embedded keys with a base64 ed25519 public
-	// key, trusted under KeyIDEnv (default "env").
+	// PubKeyEnv adds a base64 ed25519 public key to the embedded set, trusted
+	// under KeyIDEnv (default "env").
 	PubKeyEnv = "ARTEX_KNOWLEDGE_PUBKEY"
-	// KeyIDEnv is the key_id the PubKeyEnv key answers to.
+	// KeyIDEnv is the key_id the PubKeyEnv key answers to. It must not be the id
+	// of an embedded key.
 	KeyIDEnv = "ARTEX_KNOWLEDGE_KEY_ID"
 	// defaultEnvKeyID is the key_id assumed when PubKeyEnv is set without KeyIDEnv.
 	defaultEnvKeyID = "env"
 )
 
-// TrustedKeys returns the ed25519 public keys this binary will verify packs
-// against, by key_id: the embedded set plus, when PubKeyEnv is set, the override
-// key under KeyIDEnv (which replaces an embedded key of the same id). An invalid
-// override is an error rather than silently ignored, so a misconfigured key is
-// visible instead of quietly disabling a pack.
+// TrustedKey is one trusted signing key, as the pack list shows it.
+type TrustedKey struct {
+	KeyID       string `json:"key_id"`
+	Fingerprint string `json:"fingerprint"` // KeyFingerprint (hex SHA-256 of the public key)
+	Source      string `json:"source"`      // "embedded" | "env"
+}
+
+// TrustedKeys returns the ed25519 public keys this binary verifies packs
+// against, by key_id: the embedded set plus, when PubKeyEnv is set, the env key
+// under KeyIDEnv. An invalid env key, or one that reuses an embedded key's id,
+// is an error rather than silently ignored, so a misconfiguration is visible
+// instead of quietly changing which key a pack is checked against.
 func TrustedKeys() (map[string]ed25519.PublicKey, error) {
 	out := make(map[string]ed25519.PublicKey)
 	for id, b64 := range embeddedKeys {
@@ -56,27 +71,34 @@ func TrustedKeys() (map[string]ed25519.PublicKey, error) {
 		if id == "" {
 			id = defaultEnvKeyID
 		}
+		if !ValidID(id) {
+			return nil, fmt.Errorf("%s %q is invalid (1-64 characters from A-Z a-z 0-9 . _ + -)", KeyIDEnv, id)
+		}
+		if _, embedded := out[id]; embedded {
+			return nil, fmt.Errorf("%s %q is the id of a key embedded in this binary; the environment may only add a key under a new id, not replace an embedded one", KeyIDEnv, id)
+		}
 		out[id] = pub
 	}
 	return out, nil
 }
 
-// TrustedKey returns the public key for keyID among the trusted keys, or an
-// error naming why it is not trusted — the two cases the importer must tell
-// apart: no keys configured at all, versus a pack signed by an unknown key.
-func TrustedKey(keyID string) (ed25519.PublicKey, error) {
+// TrustedKeyList describes the trusted keys for the operator (GET
+// /api/knowledge/packs), so a fingerprint can be compared out of band.
+func TrustedKeyList() ([]TrustedKey, error) {
 	keys, err := TrustedKeys()
 	if err != nil {
 		return nil, err
 	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("no knowledge signing key is trusted: embed one in the binary or set %s (a pack is only trusted if a key can verify it)", PubKeyEnv)
+	out := make([]TrustedKey, 0, len(keys))
+	for id, pub := range keys {
+		src := "env"
+		if _, ok := embeddedKeys[id]; ok {
+			src = "embedded"
+		}
+		out = append(out, TrustedKey{KeyID: id, Fingerprint: KeyFingerprint(pub), Source: src})
 	}
-	pub, ok := keys[keyID]
-	if !ok {
-		return nil, fmt.Errorf("pack is signed by key_id %q, which is not trusted", keyID)
-	}
-	return pub, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].KeyID < out[j].KeyID })
+	return out, nil
 }
 
 func parsePubKey(b64 string) (ed25519.PublicKey, error) {

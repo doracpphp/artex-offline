@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -33,10 +35,33 @@ const (
 	SigName      = "manifest.sig"
 )
 
+// FormatVersion is the manifest format this binary reads; KindKnowledge is the
+// only pack kind it imports. Both are mandatory in a manifest, so a pack of
+// another kind (e.g. a future tool pack signed with the same key) or a newer
+// format is refused instead of being misread as a knowledge pack.
+const (
+	FormatVersion = 1
+	KindKnowledge = "knowledge"
+)
+
+// idPattern is the syntax of pack_id, version and key_id: one safe path
+// segment that starts with an alphanumeric (so never "." or ".."), at most 64
+// bytes. pack_id and version become directory names (config.go), and every
+// one of them is shown to the operator, so they are kept boring.
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
+
+// ValidID reports whether s is a valid pack_id / version / key_id.
+func ValidID(s string) bool { return idPattern.MatchString(s) }
+
 // Manifest is the content of manifest.json. The signature covers the exact bytes
 // of this file as written, so the importer verifies before it parses: see
 // VerifyManifest.
 type Manifest struct {
+	// Format is the manifest format version (FormatVersion). Mandatory.
+	Format int `json:"format"`
+	// Kind is the pack kind (KindKnowledge). Mandatory: a manifest that is
+	// validly signed but meant for something else must not import as knowledge.
+	Kind string `json:"kind"`
 	// PackID is a stable identifier for the knowledge set (e.g. "artex-core").
 	// Packs with the same id are versions of the same set; a downgrade is refused
 	// unless the operator confirms it (store.go).
@@ -105,14 +130,21 @@ func ParseManifest(b []byte) (*Manifest, error) {
 // any signature: required fields, well-formed file entries, and no duplicate or
 // unsafe paths. A valid manifest names only files that SafePath accepts.
 func (m *Manifest) Validate() error {
-	if strings.TrimSpace(m.PackID) == "" {
-		return fmt.Errorf("manifest: pack_id is required")
+	if m.Format != FormatVersion {
+		return fmt.Errorf("manifest: format %d is not supported (this ARTEX reads format %d)", m.Format, FormatVersion)
 	}
-	if strings.TrimSpace(m.Version) == "" {
-		return fmt.Errorf("manifest: version is required")
+	if m.Kind != KindKnowledge {
+		return fmt.Errorf("manifest: kind %q is not a knowledge pack (want %q)", m.Kind, KindKnowledge)
 	}
-	if strings.TrimSpace(m.KeyID) == "" {
-		return fmt.Errorf("manifest: key_id is required")
+	for _, f := range []struct{ name, v string }{{"pack_id", m.PackID}, {"version", m.Version}, {"key_id", m.KeyID}} {
+		if !ValidID(f.v) {
+			return fmt.Errorf("manifest: %s %q is invalid (1-64 characters from A-Z a-z 0-9 . _ + -, starting with a letter or digit)", f.name, f.v)
+		}
+	}
+	// Delta packs are not implemented: refuse the fields rather than import a
+	// delta as if it were a full pack.
+	if m.BaseVersion != "" || len(m.Deletions) > 0 {
+		return fmt.Errorf("manifest: delta packs (base_version / deletions) are not supported; build a full pack")
 	}
 	seen := make(map[string]bool, len(m.Files))
 	for _, f := range m.Files {
@@ -169,9 +201,7 @@ func SignManifest(priv ed25519.PrivateKey, manifestBytes []byte) []byte {
 	return ed25519.Sign(priv, manifestBytes)
 }
 
-// VerifyManifest checks sig against manifestBytes with pub. It is called before
-// the bytes are parsed, so a malformed or hostile manifest cannot act until its
-// signature is confirmed.
+// VerifyManifest checks sig against manifestBytes with pub.
 func VerifyManifest(pub ed25519.PublicKey, manifestBytes, sig []byte) error {
 	if len(pub) != ed25519.PublicKeySize {
 		return fmt.Errorf("verify: public key is not %d bytes", ed25519.PublicKeySize)
@@ -180,6 +210,56 @@ func VerifyManifest(pub ed25519.PublicKey, manifestBytes, sig []byte) error {
 		return fmt.Errorf("verify: manifest signature does not match the trusted key")
 	}
 	return nil
+}
+
+// KeyFingerprint is the lower-case hex SHA-256 of an ed25519 public key: what
+// the operator compares and what a pack id is pinned to (store.go).
+func KeyFingerprint(pub ed25519.PublicKey) string { return sha256Hex(pub) }
+
+// VerifiedManifest is a manifest whose exact bytes were verified by a trusted
+// key before they were parsed.
+type VerifiedManifest struct {
+	*Manifest
+	Raw         []byte // the signed manifest.json bytes
+	KeyID       string // id of the trusted key that verified them
+	Fingerprint string // KeyFingerprint of that key
+}
+
+// VerifyRaw verifies manifestBytes against the trusted keys BEFORE parsing them:
+// each key is tried on the raw bytes, and only bytes some trusted key signed are
+// parsed and validated. The manifest's own key_id must then name a key that
+// verified it, so a pack cannot claim a different signer than the one that
+// actually signed it. keys maps key_id to public key (TrustedKeys).
+func VerifyRaw(keys map[string]ed25519.PublicKey, manifestBytes, sig []byte) (*VerifiedManifest, error) {
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no knowledge signing key is trusted: embed one in the binary or set %s (a pack is only trusted if a key can verify it)", PubKeyEnv)
+	}
+	ids := make([]string, 0, len(keys))
+	for id := range keys {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	verified := map[string]ed25519.PublicKey{}
+	for _, id := range ids {
+		if VerifyManifest(keys[id], manifestBytes, sig) == nil {
+			verified[id] = keys[id]
+		}
+	}
+	if len(verified) == 0 {
+		return nil, fmt.Errorf("verify: the manifest signature does not match any trusted key")
+	}
+	m, err := ParseManifest(manifestBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.Validate(); err != nil {
+		return nil, err
+	}
+	pub, ok := verified[m.KeyID]
+	if !ok {
+		return nil, fmt.Errorf("verify: the manifest names key_id %q, but it was signed by a different trusted key", m.KeyID)
+	}
+	return &VerifiedManifest{Manifest: m, Raw: manifestBytes, KeyID: m.KeyID, Fingerprint: KeyFingerprint(pub)}, nil
 }
 
 // SafePath cleans a slash-separated pack path and rejects anything that could

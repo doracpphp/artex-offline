@@ -2,10 +2,12 @@ package knowledge
 
 import (
 	"context"
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // conceptEmbedder is a deterministic test embedder: it maps text to a one-hot-ish
@@ -60,7 +62,7 @@ func sqrt32(x float32) float32 {
 	return z
 }
 
-func buildConceptPack(t *testing.T) (string, func(string) ([]byte, error)) {
+func buildConceptPack(t *testing.T) (string, map[string]ed25519.PublicKey) {
 	t.Helper()
 	pub, priv, _ := GenerateKey()
 	dir := t.TempDir()
@@ -81,7 +83,7 @@ func buildConceptPack(t *testing.T) (string, func(string) ([]byte, error)) {
 	if err := BuildPackFile(p, in, priv); err != nil {
 		t.Fatal(err)
 	}
-	return p, func(id string) ([]byte, error) { return pub, nil }
+	return p, trustFor(pub)
 }
 
 // TestHybridVectorSearch needs a pgvector-enabled database (pgvector/pgvector
@@ -134,6 +136,84 @@ func TestHybridVectorSearch(t *testing.T) {
 	s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_embeddings").Scan(&nEmb2)
 	if nEmb2 != nEmb {
 		t.Errorf("re-embedding changed the row count: %d → %d", nEmb, nEmb2)
+	}
+}
+
+// renamedEmbedder is conceptEmbedder under another model name: same vectors,
+// but a different model as far as the index is concerned.
+type renamedEmbedder struct{ conceptEmbedder }
+
+func (renamedEmbedder) Model() string { return "concept-test-v2" }
+
+// badDimEmbedder returns a vector of the wrong dimension for every text but the
+// first, like an inconsistent embedding server.
+type badDimEmbedder struct{ conceptEmbedder }
+
+func (badDimEmbedder) Model() string { return "bad-dim" }
+
+func (b badDimEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	out, err := b.conceptEmbedder.Embed(ctx, texts)
+	for i := 1; i < len(out); i++ {
+		out[i] = append(out[i], 0)
+	}
+	return out, err
+}
+
+// A changed embedding model re-embeds the active pack: no vector of the old
+// model is left, and every chunk has one of the new model.
+func TestVectorModelChangeRebuilds(t *testing.T) {
+	s, ctx, done := openTestStore(t)
+	defer done()
+	if !VectorExtensionAvailable(ctx, s.db) {
+		t.Skip("pgvector not available")
+	}
+	s.db.ExecContext(ctx, "DROP TABLE IF EXISTS kb_embeddings")
+	// Import without an embedder, so no background worker races the steps below.
+	packPath, trust := buildConceptPack(t)
+	if _, err := s.Import(ctx, packPath, trust, ImportOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetEmbedder(conceptEmbedder{})
+	if err := s.embedActivePack(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Restart with another model: a new store, as the server builds at startup.
+	s2 := NewStore(s.db, s.cfg)
+	s2.SetEmbedder(renamedEmbedder{})
+	if err := s2.embedActivePack(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var old, cur, chunks int
+	s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_embeddings WHERE model='concept-test'").Scan(&old)
+	s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_embeddings WHERE model='concept-test-v2'").Scan(&cur)
+	s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_chunks c JOIN kb_documents d ON d.id=c.document_id JOIN kb_packs p ON p.id=d.pack_id AND p.active").Scan(&chunks)
+	if old != 0 || cur != chunks {
+		t.Fatalf("after a model change: %d old vectors, %d new, %d chunks", old, cur, chunks)
+	}
+	if !s2.vectorReady(ctx) {
+		t.Error("vector search must be ready with the new model")
+	}
+}
+
+// An embedder that returns vectors of the wrong dimension stops the worker with
+// an error instead of fetching the same chunks forever.
+func TestVectorBadDimensionStops(t *testing.T) {
+	s, ctx, done := openTestStore(t)
+	defer done()
+	if !VectorExtensionAvailable(ctx, s.db) {
+		t.Skip("pgvector not available")
+	}
+	s.db.ExecContext(ctx, "DROP TABLE IF EXISTS kb_embeddings")
+	packPath, trust := buildConceptPack(t)
+	if _, err := s.Import(ctx, packPath, trust, ImportOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetEmbedder(badDimEmbedder{})
+	ctx2, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	err := s.embedActivePack(ctx2)
+	if err == nil || ctx2.Err() != nil || !strings.Contains(err.Error(), "vector indexing stopped") {
+		t.Fatalf("a bad-dimension embedder must stop with an error, not loop: err=%v ctx=%v", err, ctx2.Err())
 	}
 }
 

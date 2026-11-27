@@ -3,27 +3,44 @@
 -- search_* / lookup_* agent tools. The pack's data files live under the data
 -- directory; only the search index and metadata are stored here.
 --
--- pg_trgm backs identifier/partial matching (CVE, CPE, function names); it is a
--- contrib module shipped in the stock postgres image, so CREATE EXTENSION is
--- safe in a migration. pgvector is deliberately NOT here: it is not in the stock
--- image, so it is created at runtime when available (Phase 2).
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- No extension is created here. pg_trgm (trigram GIN indexes that speed up the
+-- ILIKE fallback for identifiers) and pgvector (Phase 2) are created at runtime,
+-- best effort (knowledge/store.go, knowledge/vector.go): a managed or external
+-- Postgres whose role lacks CREATE EXTENSION rights must still be able to run
+-- this migration, and search works without either (more slowly / lexical-only).
 
 -- One row per imported pack. A pack id can have at most one active version at a
 -- time (the partial unique index); importing a new version deactivates the old.
+-- dir is the pack's files directory, relative to the knowledge directory
+-- (<pack_id>/<version>-<suffix>); it is '' once a superseded version's files are
+-- removed. key_fingerprint is the SHA-256 of the public key that verified the
+-- manifest.
 CREATE TABLE IF NOT EXISTS kb_packs (
     id              BIGSERIAL PRIMARY KEY,
     pack_id         TEXT NOT NULL,
     version         TEXT NOT NULL,
     key_id          TEXT NOT NULL,
+    key_fingerprint TEXT NOT NULL,
     manifest_sha256 TEXT NOT NULL,
     sources         JSONB NOT NULL DEFAULT '[]'::jsonb,
     file_count      INTEGER NOT NULL DEFAULT 0,
+    dir             TEXT NOT NULL DEFAULT '',
     active          BOOLEAN NOT NULL DEFAULT false,
     imported_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (pack_id, version)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_packs_active ON kb_packs(pack_id) WHERE active;
+
+-- Signing-key pin per pack id (trust on first import). A later pack of the same
+-- id must be signed by the key with this fingerprint unless the operator
+-- re-pins explicitly, so a key added later (e.g. through the environment)
+-- cannot silently take over an existing knowledge set.
+CREATE TABLE IF NOT EXISTS kb_key_pins (
+    pack_id         TEXT PRIMARY KEY,
+    key_id          TEXT NOT NULL,
+    key_fingerprint TEXT NOT NULL,
+    pinned_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- One row per indexed document: a CVE, an exploit, a technique-doc file, a
 -- template. ext_id is the natural id (a CVE id, an EDB-ID) when there is one.
@@ -49,9 +66,9 @@ CREATE INDEX IF NOT EXISTS idx_kb_documents_extid ON kb_documents(kind, lower(ex
 CREATE INDEX IF NOT EXISTS idx_kb_documents_cveids ON kb_documents USING gin(cve_ids);
 
 -- Body chunks for full-text search. tsv is an english-config tsvector generated
--- from the body; the GIN index on it backs search ranking (ts_rank_cd). A second
--- GIN trigram index on the body catches identifiers and partial tokens the
--- english parser would stem or split (CVE-2021-41773, wp-config.php).
+-- from the body; the GIN index on it backs search ranking (ts_rank_cd). The
+-- trigram index on the body that speeds up the ILIKE fallback for identifiers
+-- (CVE-2021-41773, wp-config.php) is created at runtime when pg_trgm is available.
 CREATE TABLE IF NOT EXISTS kb_chunks (
     id          BIGSERIAL PRIMARY KEY,
     document_id BIGINT NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
@@ -61,7 +78,6 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     UNIQUE (document_id, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_tsv ON kb_chunks USING gin(tsv);
-CREATE INDEX IF NOT EXISTS idx_kb_chunks_trgm ON kb_chunks USING gin(body gin_trgm_ops);
 
 -- CPE applicability rows for lookup_software: one per (CVE document, cpeMatch).
 -- The query filters by vendor/product (indexed) then evaluates the version range
@@ -80,5 +96,3 @@ CREATE TABLE IF NOT EXISTS kb_cpe_matches (
     version_end_excluding   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_kb_cpe_product ON kb_cpe_matches(product, vendor);
--- Partial-name product search (e.g. "http_server" from "Apache httpd").
-CREATE INDEX IF NOT EXISTS idx_kb_cpe_product_trgm ON kb_cpe_matches USING gin(product gin_trgm_ops);

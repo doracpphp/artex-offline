@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/ed25519"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,18 +42,10 @@ func testPack(t *testing.T, files map[string]string) (path string, pub ed25519.P
 	return path, pub, priv
 }
 
-func trustFor(pub ed25519.PublicKey) func(string) ([]byte, error) {
-	return func(keyID string) ([]byte, error) {
-		if keyID != "test-key" {
-			return nil, &notTrustedError{keyID}
-		}
-		return pub, nil
-	}
+// trustFor is a trusted key set holding pub under the id the test packs use.
+func trustFor(pub ed25519.PublicKey) map[string]ed25519.PublicKey {
+	return map[string]ed25519.PublicKey{"test-key": pub}
 }
-
-type notTrustedError struct{ id string }
-
-func (e *notTrustedError) Error() string { return "key " + e.id + " not trusted" }
 
 func TestPackRoundTrip(t *testing.T) {
 	files := map[string]string{
@@ -78,7 +71,7 @@ func TestPackRoundTrip(t *testing.T) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := ExtractPackFile(path, m, dest, ExtractLimits{}); err != nil {
+	if err := ExtractPackFile(path, m.Manifest, dest, ExtractLimits{}); err != nil {
 		t.Fatalf("extract: %v", err)
 	}
 	for p, want := range files {
@@ -95,10 +88,69 @@ func TestVerifyRejectsWrongKey(t *testing.T) {
 	if _, err := VerifyPackFile(path, trustFor(otherPub)); err == nil {
 		t.Fatal("a pack must not verify against a different key")
 	}
-	// An untrusted key_id is refused before any signature check.
-	_, err := VerifyPackFile(path, func(string) ([]byte, error) { return nil, &notTrustedError{"x"} })
-	if err == nil || !strings.Contains(err.Error(), "not trusted") {
-		t.Fatalf("untrusted key_id must be refused: %v", err)
+	// No trusted key at all: refused, with a message that says so.
+	_, err := VerifyPackFile(path, nil)
+	if err == nil || !strings.Contains(err.Error(), "no knowledge signing key is trusted") {
+		t.Fatalf("no trusted key must be refused: %v", err)
+	}
+}
+
+// The signature is checked on the raw bytes before they are parsed: a manifest
+// that is not even JSON, signed by nobody trusted, fails on the signature and is
+// never handed to the parser.
+func TestVerifyBeforeParse(t *testing.T) {
+	path, pub, _ := testPack(t, map[string]string{"docs/x.md": "hi"})
+	garbage := filepath.Join(t.TempDir(), "garbage.tar.gz")
+	rewriteManifest(t, path, garbage, func([]byte) []byte { return []byte("{not json at all") })
+	_, err := VerifyPackFile(garbage, trustFor(pub))
+	if err == nil || !strings.Contains(err.Error(), "signature") || strings.Contains(err.Error(), "parse manifest") {
+		t.Fatalf("an unsigned manifest must fail on the signature, before parsing: %v", err)
+	}
+}
+
+// A pack signed by trusted key A must not claim to be signed by key B, even if
+// B is trusted too: key_id has to name the key that actually verified it.
+func TestVerifyKeyIDMustNameTheSigner(t *testing.T) {
+	path, pub, _ := testPack(t, map[string]string{"docs/x.md": "hi"})
+	otherPub, _, _ := GenerateKey()
+	keys := map[string]ed25519.PublicKey{"test-key": otherPub, "real-signer": pub}
+	_, err := VerifyPackFile(path, keys)
+	if err == nil || !strings.Contains(err.Error(), "signed by a different trusted key") {
+		t.Fatalf("key_id naming a key that did not sign must be refused: %v", err)
+	}
+	vm, err := VerifyPackFile(path, trustFor(pub))
+	if err != nil || vm.KeyID != "test-key" || vm.Fingerprint != KeyFingerprint(pub) || len(vm.Raw) == 0 {
+		t.Fatalf("verified manifest: %+v, %v", vm, err)
+	}
+}
+
+// The environment may add a key, never replace an embedded one.
+func TestTrustedKeysEnvAddsOnly(t *testing.T) {
+	pub, _, _ := GenerateKey()
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	prev := embeddedKeys
+	t.Cleanup(func() { embeddedKeys = prev })
+	embeddedPub, _, _ := GenerateKey()
+	embeddedKeys = map[string]string{"artex-knowledge-1": base64.StdEncoding.EncodeToString(embeddedPub)}
+
+	t.Setenv(PubKeyEnv, b64)
+	t.Setenv(KeyIDEnv, "artex-knowledge-1")
+	if _, err := TrustedKeys(); err == nil || !strings.Contains(err.Error(), "may only add") {
+		t.Fatalf("an env key under an embedded id must be refused: %v", err)
+	}
+	t.Setenv(KeyIDEnv, "../evil")
+	if _, err := TrustedKeys(); err == nil {
+		t.Fatal("an invalid env key id must be refused")
+	}
+	t.Setenv(KeyIDEnv, "")
+	keys, err := TrustedKeys()
+	if err != nil || len(keys) != 2 || !keys["env"].Equal(pub) || !keys["artex-knowledge-1"].Equal(embeddedPub) {
+		t.Fatalf("env key must be added under %q next to the embedded one: %v %v", defaultEnvKeyID, keys, err)
+	}
+	list, err := TrustedKeyList()
+	if err != nil || len(list) != 2 || list[0].KeyID != "artex-knowledge-1" || list[0].Source != "embedded" ||
+		list[1].Source != "env" || list[1].Fingerprint != KeyFingerprint(pub) {
+		t.Fatalf("trusted key list: %+v %v", list, err)
 	}
 }
 
@@ -125,7 +177,7 @@ func TestExtractRejectsTamperedFile(t *testing.T) {
 	}
 	dest := filepath.Join(t.TempDir(), "out")
 	os.MkdirAll(dest, 0o755)
-	if err := ExtractPackFile(tampered, m, dest, ExtractLimits{}); err == nil {
+	if err := ExtractPackFile(tampered, m.Manifest, dest, ExtractLimits{}); err == nil {
 		t.Fatal("a data file not matching its manifest hash must fail extraction")
 	}
 }
@@ -138,7 +190,7 @@ func TestExtractRejectsUnlistedAndMissing(t *testing.T) {
 	m, _ := VerifyPackFile(withExtra, trustFor(pub))
 	dest := filepath.Join(t.TempDir(), "o1")
 	os.MkdirAll(dest, 0o755)
-	if err := ExtractPackFile(withExtra, m, dest, ExtractLimits{}); err == nil {
+	if err := ExtractPackFile(withExtra, m.Manifest, dest, ExtractLimits{}); err == nil {
 		t.Fatal("an entry absent from the manifest must be refused")
 	}
 
@@ -149,7 +201,7 @@ func TestExtractRejectsUnlistedAndMissing(t *testing.T) {
 	m2, _ := VerifyPackFile(dropped, trustFor(pub2))
 	dest2 := filepath.Join(t.TempDir(), "o2")
 	os.MkdirAll(dest2, 0o755)
-	if err := ExtractPackFile(dropped, m2, dest2, ExtractLimits{}); err == nil {
+	if err := ExtractPackFile(dropped, m2.Manifest, dest2, ExtractLimits{}); err == nil {
 		t.Fatal("a manifest file missing from the archive must fail")
 	}
 }
@@ -168,21 +220,46 @@ func TestSafePath(t *testing.T) {
 }
 
 func TestManifestValidate(t *testing.T) {
-	good := &Manifest{PackID: "p", Version: "1", KeyID: "k",
-		Files: []FileEntry{{Path: "a/b.txt", Size: 3, SHA256: strings.Repeat("ab", 32)}}}
-	if err := good.Validate(); err != nil {
+	mk := func(edit func(*Manifest)) *Manifest {
+		m := &Manifest{Format: FormatVersion, Kind: KindKnowledge, PackID: "p", Version: "1", KeyID: "k",
+			Files: []FileEntry{{Path: "a/b.txt", Size: 3, SHA256: strings.Repeat("ab", 32)}}}
+		if edit != nil {
+			edit(m)
+		}
+		return m
+	}
+	if err := mk(nil).Validate(); err != nil {
 		t.Fatalf("valid manifest rejected: %v", err)
 	}
+	hash := strings.Repeat("a", 64)
 	for name, m := range map[string]*Manifest{
-		"no id":      {Version: "1", KeyID: "k"},
-		"no version": {PackID: "p", KeyID: "k"},
-		"no key":     {PackID: "p", Version: "1"},
-		"bad hash":   {PackID: "p", Version: "1", KeyID: "k", Files: []FileEntry{{Path: "a", Size: 1, SHA256: "xyz"}}},
-		"traversal":  {PackID: "p", Version: "1", KeyID: "k", Files: []FileEntry{{Path: "../a", Size: 1, SHA256: strings.Repeat("a", 64)}}},
-		"reserved":   {PackID: "p", Version: "1", KeyID: "k", Files: []FileEntry{{Path: ManifestName, Size: 1, SHA256: strings.Repeat("a", 64)}}},
+		"no format":       mk(func(m *Manifest) { m.Format = 0 }),
+		"newer format":    mk(func(m *Manifest) { m.Format = FormatVersion + 1 }),
+		"no kind":         mk(func(m *Manifest) { m.Kind = "" }),
+		"tool pack":       mk(func(m *Manifest) { m.Kind = "tools" }),
+		"no id":           mk(func(m *Manifest) { m.PackID = "" }),
+		"dot id":          mk(func(m *Manifest) { m.PackID = "." }),
+		"dotdot id":       mk(func(m *Manifest) { m.PackID = ".." }),
+		"traversal id":    mk(func(m *Manifest) { m.PackID = "../../keys" }),
+		"slash id":        mk(func(m *Manifest) { m.PackID = "a/b" }),
+		"hidden id":       mk(func(m *Manifest) { m.PackID = ".staging" }),
+		"long id":         mk(func(m *Manifest) { m.PackID = strings.Repeat("a", 65) }),
+		"no version":      mk(func(m *Manifest) { m.Version = "" }),
+		"traversal ver":   mk(func(m *Manifest) { m.Version = "../1" }),
+		"no key":          mk(func(m *Manifest) { m.KeyID = "" }),
+		"delta base":      mk(func(m *Manifest) { m.BaseVersion = "0.9" }),
+		"delta deletions": mk(func(m *Manifest) { m.Deletions = []string{"docs/x.md"} }),
+		"bad hash":        mk(func(m *Manifest) { m.Files = []FileEntry{{Path: "a", Size: 1, SHA256: "xyz"}} }),
+		"traversal":       mk(func(m *Manifest) { m.Files = []FileEntry{{Path: "../a", Size: 1, SHA256: hash}} }),
+		"reserved":        mk(func(m *Manifest) { m.Files = []FileEntry{{Path: ManifestName, Size: 1, SHA256: hash}} }),
 	} {
 		if err := m.Validate(); err == nil {
 			t.Errorf("%s: should be invalid", name)
+		}
+	}
+	for _, ok := range []string{"artex-core", "a", "2026.11.27", "v1.2.3+build_4", "A-1"} {
+		if !ValidID(ok) {
+			t.Errorf("ValidID(%q) should accept", ok)
 		}
 	}
 }

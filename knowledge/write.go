@@ -51,6 +51,8 @@ func BuildPack(out io.Writer, in PackInput, priv ed25519.PrivateKey) error {
 	}
 
 	m := &Manifest{
+		Format:  FormatVersion,
+		Kind:    KindKnowledge,
 		PackID:  in.PackID,
 		Version: in.Version,
 		BuiltAt: time.Now().UTC(),

@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -15,12 +18,13 @@ import (
 
 // PackRow is one imported pack, for the management UI.
 type PackRow struct {
-	PackID     string    `json:"pack_id"`
-	Version    string    `json:"version"`
-	KeyID      string    `json:"key_id"`
-	FileCount  int       `json:"file_count"`
-	Active     bool      `json:"active"`
-	ImportedAt time.Time `json:"imported_at"`
+	PackID         string    `json:"pack_id"`
+	Version        string    `json:"version"`
+	KeyID          string    `json:"key_id"`
+	KeyFingerprint string    `json:"key_fingerprint"` // SHA-256 of the key that verified the manifest
+	FileCount      int       `json:"file_count"`
+	Active         bool      `json:"active"`
+	ImportedAt     time.Time `json:"imported_at"`
 }
 
 // ExploitHit is one search_exploits result.
@@ -72,7 +76,17 @@ type SoftwareHit struct {
 	CVSS        *CVSS    `json:"cvss,omitempty"`
 	MatchedCPE  string   `json:"matched_cpe"`
 	CWEs        []string `json:"cwes,omitempty"`
-	Source      string   `json:"source"`
+	Vendor      string   `json:"vendor"`
+	Product     string   `json:"product"`
+	// MatchBasis says how the product matched: "exact" (the CPE product equals
+	// the query) or "partial" (the query is a substring of the CPE product, used
+	// only when nothing matched exactly). A partial match can be a different
+	// product; check Vendor/Product before relying on it.
+	MatchBasis string `json:"match_basis"`
+	// VersionChecked is true when a version was given and the CPE range was
+	// evaluated against it; false means "any version of this product".
+	VersionChecked bool   `json:"version_checked"`
+	Source         string `json:"source"`
 }
 
 // KnowledgeChunk is a read_knowledge result: one chunk's full text.
@@ -220,41 +234,66 @@ LIMIT 50`, cve)
 // product/vendor in SQL, then the version range is evaluated in Go
 // (CPEMatch.MatchesVersion), which the SQL cannot express for the odd CPE
 // version strings. Results are one per CVE, highest CVSS first.
+//
+// An exact product match (the CPE product equals the query, spaces folded to
+// CPE underscores) is preferred: only when there is none are products that
+// merely contain the query used, and each hit says which basis it matched on
+// (MatchBasis), so "php" does not silently return phpmyadmin CVEs as PHP ones.
+// Candidate rows are read in a fixed order, so the same query returns the same
+// hits.
 func (s *Store) LookupSoftware(ctx context.Context, product, vendor, version string, limit int) ([]SoftwareHit, error) {
-	product = strings.ToLower(strings.TrimSpace(product))
-	vendor = strings.ToLower(strings.TrimSpace(vendor))
+	product = strings.Join(strings.Fields(strings.ToLower(product)), "_")
+	vendor = strings.Join(strings.Fields(strings.ToLower(vendor)), "_")
+	version = strings.TrimSpace(version)
 	if product == "" {
 		return nil, fmt.Errorf("a product name is required")
 	}
 	limit = clampLimit(limit, 50)
-	// Normalise a human product ("Apache httpd") toward CPE form ("http_server"
-	// won't match, but "httpd"/"apache" will via trigram); match exact or fuzzy.
+	hits, err := s.lookupSoftware(ctx, `m.product = $1`, product, vendor, version, "exact")
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) == 0 {
+		hits, err = s.lookupSoftware(ctx, `m.product LIKE '%' || $1 || '%' ESCAPE '\'`, escapeLike(product), vendor, version, "partial")
+		if err != nil {
+			return nil, err
+		}
+	}
+	sortByCVSS(hits)
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits, nil
+}
+
+// maxSoftwareCandidates caps the CPE rows one lookup_software basis reads.
+const maxSoftwareCandidates = 5000
+
+func (s *Store) lookupSoftware(ctx context.Context, productCond, product, vendor, version, basis string) ([]SoftwareHit, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT p.pack_id, d.ext_id, d.title, d.meta, m.criteria,
+SELECT p.pack_id, d.ext_id, d.title, d.meta, m.criteria, m.vendor, m.product,
        m.version_start_including, m.version_start_excluding,
        m.version_end_including, m.version_end_excluding
 FROM kb_cpe_matches m
 JOIN kb_documents d ON d.id = m.document_id
 JOIN kb_packs p ON p.id = d.pack_id AND p.active
 WHERE m.vulnerable
-  AND (m.product = $1 OR m.product ILIKE '%'||$1||'%')
+  AND `+productCond+`
   AND ($2 = '' OR m.vendor = $2)
-LIMIT 5000`, product, vendor)
+ORDER BY m.product, m.vendor, d.ext_id, m.id
+LIMIT $3`, product, vendor, maxSoftwareCandidates)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	type cand struct {
-		hit  SoftwareHit
-		rank float64
-	}
-	best := map[string]cand{}
+	seen := map[string]bool{}
+	var out []SoftwareHit
 	for rows.Next() {
-		var packID string
+		var packID, mVendor, mProduct string
 		var extID, title sql.NullString
 		var metaRaw []byte
 		var m CPEMatch
-		if err := rows.Scan(&packID, &extID, &title, &metaRaw, &m.Criteria,
+		if err := rows.Scan(&packID, &extID, &title, &metaRaw, &m.Criteria, &mVendor, &mProduct,
 			&m.VersionStartIncluding, &m.VersionStartExcluding,
 			&m.VersionEndIncluding, &m.VersionEndExcluding); err != nil {
 			return nil, err
@@ -262,33 +301,28 @@ LIMIT 5000`, product, vendor)
 		if version != "" && !m.MatchesVersion(version) {
 			continue
 		}
+		cve := extID.String
+		if seen[cve] {
+			continue // first matching CPE row (in the fixed order) represents the CVE
+		}
+		seen[cve] = true
 		var meta docMeta
 		_ = json.Unmarshal(metaRaw, &meta)
-		cve := extID.String
-		score := 0.0
-		if meta.CVSS != nil {
-			score = meta.CVSS.BaseScore
-		}
-		if cur, ok := best[cve]; ok && cur.rank >= score {
-			continue
-		}
-		best[cve] = cand{rank: score, hit: SoftwareHit{
+		out = append(out, SoftwareHit{
 			CVE: cve, Description: title.String, CVSS: meta.CVSS, CWEs: meta.CWEs,
-			MatchedCPE: m.Criteria, Source: source(packID, "nvd/"+cve, 0),
-		}}
+			MatchedCPE: m.Criteria, Vendor: mVendor, Product: mProduct,
+			MatchBasis: basis, VersionChecked: version != "",
+			Source: source(packID, "nvd/"+cve, 0),
+		})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]SoftwareHit, 0, len(best))
-	for _, c := range best {
-		out = append(out, c.hit)
-	}
-	sortByCVSS(out)
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return out, rows.Err()
+}
+
+// escapeLike escapes the LIKE metacharacters in s for an ESCAPE '\' pattern,
+// so a product name with % or _ (CPE products use _ a lot) matches literally.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // ReadKnowledge returns one chunk's full text, located by a document's source
@@ -327,31 +361,71 @@ LIMIT 1`, ref, chunk).Scan(&packID, &sourcePath, &title, &body, &total)
 	}, true, nil
 }
 
-// DocumentFilePath returns the on-disk path of a document's source file, for
-// copy_knowledge_file: the pack directory joined with the document's source
-// path, re-checked to stay within the pack directory. ok is false when the
-// document has no file (a CVE) or is not found.
-func (s *Store) DocumentFilePath(ctx context.Context, ref string) (absPath, packID, sourcePath string, ok bool, err error) {
+// MaxDocumentFileBytes caps a file copy_knowledge_file copies out of a pack.
+// ExploitDB files are small (the largest are a few MB of archives); the cap only
+// stops a hostile or broken pack from filling the working directory.
+const MaxDocumentFileBytes = 32 << 20
+
+// ReadDocumentFile returns the content of a document's source file, for
+// copy_knowledge_file. The file is opened through an os.Root of the active
+// pack's directory, so neither the stored directory nor the source path can
+// reach outside it (no "..", no symlink out), and it must be a regular file of
+// at most maxBytes. ok is false when the document has no file (a CVE) or is
+// not found.
+func (s *Store) ReadDocumentFile(ctx context.Context, ref string, maxBytes int64) (data []byte, packID, sourcePath string, ok bool, err error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return "", "", "", false, fmt.Errorf("a document id or source path is required")
+		return nil, "", "", false, fmt.Errorf("a document id or source path is required")
 	}
+	var dir string
 	var sp sql.NullString
 	err = s.db.QueryRowContext(ctx, `
-SELECT p.pack_id, d.source_path
+SELECT p.pack_id, p.dir, d.source_path
 FROM kb_documents d
 JOIN kb_packs p ON p.id = d.pack_id AND p.active
 WHERE (d.source_path = $1 OR lower(d.ext_id) = lower($1)) AND d.source_path IS NOT NULL
-LIMIT 1`, ref).Scan(&packID, &sp)
+ORDER BY d.id
+LIMIT 1`, ref).Scan(&packID, &dir, &sp)
 	if err == sql.ErrNoRows {
-		return "", "", "", false, nil
+		return nil, "", "", false, nil
 	}
 	if err != nil {
-		return "", "", "", false, err
+		return nil, "", "", false, err
 	}
-	clean, perr := SafePath(sp.String)
-	if perr != nil {
-		return "", "", "", false, perr
+	clean, err := SafePath(sp.String)
+	if err != nil {
+		return nil, "", "", false, err
 	}
-	return s.cfg.PackDir(packID) + "/" + clean, packID, clean, true, nil
+	absDir, err := s.cfg.packFilesDir(dir)
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	root, err := os.OpenRoot(absDir)
+	if err != nil {
+		return nil, "", "", false, fmt.Errorf("open pack directory: %w", err)
+	}
+	defer root.Close()
+	f, err := root.Open(filepath.FromSlash(clean))
+	if err != nil {
+		return nil, "", "", false, fmt.Errorf("open pack file %s: %w", clean, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, "", "", false, fmt.Errorf("pack file %s is not a regular file", clean)
+	}
+	if fi.Size() > maxBytes {
+		return nil, "", "", false, fmt.Errorf("pack file %s is %d bytes, over the %d-byte copy limit", clean, fi.Size(), maxBytes)
+	}
+	data, err = io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, "", "", false, fmt.Errorf("pack file %s is over the %d-byte copy limit", clean, maxBytes)
+	}
+	return data, packID, clean, true, nil
 }

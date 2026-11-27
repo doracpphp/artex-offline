@@ -420,7 +420,7 @@ func workerSystemParts(proxyAddr, caCert, dataDir, runDir string) (staticPart, d
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	staticPart = body + untrustedContentTail(body) + workerTrafficBlock(caCert != "") + offlineBlock()
+	staticPart = body + untrustedContentTail(body) + workerTrafficBlock(caCert != "") + offlineBlock(true)
 	dynamicHead = workerArtifactSpec(runDir) + noiseProfileBlock()
 	return staticPart, dynamicHead
 }

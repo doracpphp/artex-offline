@@ -567,12 +567,19 @@ go run ./cmd/artex-knowledge build -key signing.key -key-id artex-kb-1 \
 
 # Offline: trust the key (paste into knowledge/keys.go, or set the env vars), then import
 #   ARTEX_KNOWLEDGE_PUBKEY=<base64 from keygen>  ARTEX_KNOWLEDGE_KEY_ID=artex-kb-1
-# UI: System → Knowledge, or:
+# then place the pack in data/knowledge/inbox/ and import it (no UI yet):
 curl -X POST "http://127.0.0.1:8787/api/knowledge/import?path=inbox/pack.tar.gz" -H "Authorization: Bearer $TOKEN"
 ```
 
-The pack is a trust boundary: its ed25519 signature is checked before anything is read, then
-every file against the hash in the manifest. Search is lexical by default (Postgres full-text +
+The first import of a pack id pins its signing key: a later pack of that id signed by another
+key is refused until you re-import with `?repin=1` (after checking the fingerprint shown in the
+startup log and in `GET /api/knowledge/packs`). An environment key can only add a key id, never
+replace one embedded in the binary.
+
+The pack is a trust boundary: its ed25519 signature is checked on the raw manifest bytes before
+they are parsed, then every file against the hash in the manifest as it is extracted. Each
+import goes to a new directory and is activated in one transaction, so a failed import leaves
+the active pack untouched. Search is lexical by default (Postgres full-text +
 trigram). For **hybrid search** (semantic vector ranking fused with lexical), point it at a
 local embedding model and use a pgvector Postgres image:
 

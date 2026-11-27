@@ -126,13 +126,15 @@ func build(args []string) error {
 		fmt.Printf("  %-10s %5d files from %s\n", prefix, n, dir)
 		return nil
 	}
-	if err := add("exploitdb", *exploitdb, any2(true), knowledge.Source{Name: "exploitdb", License: "GPL-2.0 (mixed)"}); err != nil {
+	// ExploitDB: only the index and the exploit files it points at (exploits/...),
+	// not the mirror's scripts, shellcodes or git metadata.
+	if err := add("exploitdb", *exploitdb, exploitDBFile, knowledge.Source{Name: "exploitdb", License: "GPL-2.0 (mixed)"}); err != nil {
 		return err
 	}
 	if err := add("nvd", *nvd, hasExt(".json"), knowledge.Source{Name: "nvd", Version: "NVD 2.0", License: "NVD terms of use"}); err != nil {
 		return err
 	}
-	if err := add("docs", *docs, any2(true), knowledge.Source{Name: "docs"}); err != nil {
+	if err := add("docs", *docs, hasExt(".md", ".markdown", ".txt", ".rst", ".adoc"), knowledge.Source{Name: "docs"}); err != nil {
 		return err
 	}
 	if err := add("templates", *templates, hasExt(".yaml", ".yml"), knowledge.Source{Name: "nuclei-templates", License: "MIT"}); err != nil {
@@ -155,21 +157,34 @@ func build(args []string) error {
 	return nil
 }
 
-// collect walks dir and adds each matching file to files under prefix/<relpath>.
+// collect walks dir and adds each matching regular file to files under
+// prefix/<relpath>. pred gets the slash path relative to dir. Hidden entries
+// (.git, .github, editor files) and anything that is not a regular file (a
+// symlink, a device) are skipped: a pack carries data, not a checkout.
 func collect(files map[string]string, prefix, dir string, pred func(string) bool) (int, error) {
 	n := 0
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !pred(path) {
+		if path != dir && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
-		packPath := prefix + "/" + filepath.ToSlash(rel)
+		rel = filepath.ToSlash(rel)
+		if !pred(rel) {
+			return nil
+		}
+		packPath := prefix + "/" + rel
 		if _, err := knowledge.SafePath(packPath); err != nil {
 			return fmt.Errorf("file %q maps to unsafe pack path: %w", path, err)
 		}
@@ -195,7 +210,11 @@ func loadPrivKey(path string) (ed25519.PrivateKey, error) {
 	return ed25519.PrivateKey(raw), nil
 }
 
-func any2(b bool) func(string) bool { return func(string) bool { return b } }
+// exploitDBFile selects the ExploitDB index and the exploit files under
+// exploits/, which the index's file column names relative to the mirror root.
+func exploitDBFile(rel string) bool {
+	return rel == "files_exploits.csv" || strings.HasPrefix(rel, "exploits/")
+}
 
 func hasExt(exts ...string) func(string) bool {
 	return func(p string) bool {
