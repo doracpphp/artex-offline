@@ -37,7 +37,9 @@ var baseDial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Seco
 // Such a client never dials without one: a scope missing at the dial means the
 // context value was lost on the way, and the dial fails with
 // TARGET_GATE_UNAVAILABLE. A client built without a scope (the operator's test
-// endpoint) dials as before, and so does every client while the gate is off.
+// endpoint) dials as before, and so does every client while the gate is off —
+// except that in offline mode those ungated dials reach local addresses only
+// (OfflineEgressBlocked). A gated scope stays the authority in offline mode.
 func PinnedDialer(toolName string, scoped bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		scope, ok := TargetScopeFromContext(ctx)
@@ -45,12 +47,12 @@ func PinnedDialer(toolName string, scoped bool) func(ctx context.Context, networ
 		case !ok && scoped:
 			return nil, &dialError{code: TargetGateUnavailable, target: addr, reason: "the target scope of the session did not reach the connection"}
 		case !ok:
-			return baseDial(ctx, network, addr)
+			return offlineDial(ctx, network, addr, baseDial)
 		case scope.Enabled == nil || !scope.Enabled():
 			if scope.Interceptor != nil {
-				return scope.Interceptor.baseDialer()(ctx, network, addr)
+				return offlineDial(ctx, network, addr, scope.Interceptor.baseDialer())
 			}
-			return baseDial(ctx, network, addr)
+			return offlineDial(ctx, network, addr, baseDial)
 		case scope.Interceptor == nil:
 			return nil, &dialError{code: TargetGateUnavailable, target: addr, reason: "the session's target scope carries no gate"}
 		}
@@ -213,10 +215,10 @@ func IsTargetBlocked(err error) (string, bool) {
 //     (asset block rules, exemptions, fresh DNS resolution, and pin checks).
 //   - Otherwise enforces global asset block rules (domain, IP, and CIDR, before
 //     and after fresh DNS resolution) and dials only the resolved addresses that
-//     passed those rules.
+//     passed those rules — and, in offline mode, only the local ones among them.
 func (i *Interceptor) DialSOCKS5(ctx context.Context, network, addr string) (net.Conn, error) {
 	if i == nil {
-		return baseDial(ctx, network, addr)
+		return offlineDial(ctx, network, addr, baseDial)
 	}
 	if scope, ok := TargetScopeFromContext(ctx); ok && scope.Enabled != nil && scope.Enabled() {
 		return i.dialTarget(ctx, scope, "socks5", network, addr)
@@ -226,7 +228,7 @@ func (i *Interceptor) DialSOCKS5(ctx context.Context, network, addr string) (net
 		return nil, &dialError{code: TargetGateUnavailable, target: addr, reason: "the address of the connection could not be read (" + err.Error() + ")"}
 	}
 	if i.targets == nil {
-		return i.baseDialer()(ctx, network, addr)
+		return offlineDial(ctx, network, addr, i.baseDialer())
 	}
 	rules, err := i.targets.BlockRules(db.TargetScopeRef{})
 	if err != nil {
@@ -249,7 +251,11 @@ func (i *Interceptor) DialSOCKS5(ctx context.Context, network, addr string) (net
 			return nil, &dialError{code: TargetRuleBlocked, target: t.String(), reason: fmt.Sprintf("%s is blocked by an asset rule. %s", t, rule.Reason())}
 		}
 	}
-	return i.dialAddrs(ctx, network, ct.ips, t.Port)
+	ips, err := offlineFilter(t.String(), ct.ips)
+	if err != nil {
+		return nil, err
+	}
+	return i.dialAddrs(ctx, network, ips, t.Port)
 }
 
 // PinnedUDP4Resolver returns a per-datagram IPv4 destination resolver that
@@ -263,12 +269,14 @@ func PinnedUDP4Resolver(toolName string, scoped bool) func(ctx context.Context, 
 		case !ok && scoped:
 			return nil, &dialError{code: TargetGateUnavailable, target: addr, reason: "the target scope of the session did not reach the connection"}
 		case !ok:
-			return resolvePlainUDP4(ctx, addr)
+			a, err := resolvePlainUDP4(ctx, addr)
+			return offlineUDP(addr, a, err)
 		case scope.Enabled == nil || !scope.Enabled():
 			if scope.Interceptor != nil {
 				return scope.Interceptor.ResolveUDP4(ctx, addr)
 			}
-			return resolvePlainUDP4(ctx, addr)
+			a, err := resolvePlainUDP4(ctx, addr)
+			return offlineUDP(addr, a, err)
 		case scope.Interceptor == nil:
 			return nil, &dialError{code: TargetGateUnavailable, target: addr, reason: "the session's target scope carries no gate"}
 		}
@@ -282,7 +290,8 @@ func PinnedUDP4Resolver(toolName string, scoped bool) func(ctx context.Context, 
 // Returns the first verified IPv4 *net.UDPAddr.
 func (i *Interceptor) ResolveUDP4(ctx context.Context, addr string) (*net.UDPAddr, error) {
 	if i == nil {
-		return resolvePlainUDP4(ctx, addr)
+		a, err := resolvePlainUDP4(ctx, addr)
+		return offlineUDP(addr, a, err)
 	}
 	if scope, ok := TargetScopeFromContext(ctx); ok && scope.Enabled != nil && scope.Enabled() {
 		return i.resolveTargetUDP4(ctx, scope, "socks5-udp", addr)
@@ -292,7 +301,8 @@ func (i *Interceptor) ResolveUDP4(ctx context.Context, addr string) (*net.UDPAdd
 		return nil, &dialError{code: TargetGateUnavailable, target: addr, reason: "the address of the datagram could not be read (" + err.Error() + ")"}
 	}
 	if i.targets == nil {
-		return resolvePlainUDP4(ctx, addr)
+		a, err := resolvePlainUDP4(ctx, addr)
+		return offlineUDP(addr, a, err)
 	}
 	rules, err := i.targets.BlockRules(db.TargetScopeRef{})
 	if err != nil {
@@ -315,7 +325,11 @@ func (i *Interceptor) ResolveUDP4(ctx context.Context, addr string) (*net.UDPAdd
 			return nil, &dialError{code: TargetRuleBlocked, target: t.String(), reason: fmt.Sprintf("%s is blocked by an asset rule. %s", t, rule.Reason())}
 		}
 	}
-	return firstIPv4UDPAddr(ct.ips, t.Port)
+	ips, err := offlineFilter(t.String(), ct.ips)
+	if err != nil {
+		return nil, err
+	}
+	return firstIPv4UDPAddr(ips, t.Port)
 }
 
 func (i *Interceptor) resolveTargetUDP4(ctx context.Context, scope TargetScope, toolName, addr string) (*net.UDPAddr, error) {

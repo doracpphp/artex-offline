@@ -45,6 +45,8 @@ export function MainContent({ children }: { children: ReactNode }) {
   const [latest, setLatest] = useState("");
   // Set when the server started with agent isolation degraded (server/isolation.go): the self-test failure.
   const [degraded, setDegraded] = useState<string | null>(null);
+  // Set when the offline overlay's egress firewall could not be applied (server/egress_firewall.go): the reason.
+  const [firewallDegraded, setFirewallDegraded] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -54,6 +56,7 @@ export function MainContent({ children }: { children: ReactNode }) {
         const l = h.latest_version ?? "";
         setLatest(l && getLocalStorageValue(UPDATE_DISMISSED_KEY) !== l ? l : "");
         setDegraded(h.isolation?.mode === "degraded" ? (h.isolation.reason ?? "") : null);
+        setFirewallDegraded(h.egress_firewall?.mode === "degraded" ? (h.egress_firewall.reason ?? "") : null);
       })
       .catch(() => setVersion(""));
   }, []);
@@ -68,6 +71,20 @@ export function MainContent({ children }: { children: ReactNode }) {
       >
         {t(
           "Agent isolation is degraded: agent shells, tools and file tools run with the server's identity and may read its keys, config and database credentials.",
+        )}
+      </div>
+    ) : null;
+
+  // Not dismissible either: it stays while the offline overlay runs without its egress firewall.
+  const firewallBanner =
+    firewallDegraded !== null ? (
+      <div
+        role="alert"
+        title={firewallDegraded}
+        className="flex shrink-0 items-center justify-center gap-2 border-b border-destructive/40 bg-destructive/10 px-4 py-1 text-destructive text-xs"
+      >
+        {t(
+          "Egress firewall is not enforced: tools in agent shells that ignore the proxy settings can reach any network the host routes to.",
         )}
       </div>
     ) : null;
@@ -95,6 +112,7 @@ export function MainContent({ children }: { children: ReactNode }) {
     return (
       <>
         {isolationBanner}
+        {firewallBanner}
         {updateBanner}
         {children}
       </>
@@ -104,6 +122,7 @@ export function MainContent({ children }: { children: ReactNode }) {
   return (
     <>
       {isolationBanner}
+      {firewallBanner}
       {updateBanner}
       <header
         className={cn(

@@ -168,6 +168,9 @@ type ToolSet struct {
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
 	ownerNode int64
+	// knowledge backs the offline knowledge-search tools (search_exploits,
+	// lookup_cve, ...). nil = the tools report that no pack is imported.
+	knowledge KnowledgeStore
 	GoalMet   bool
 	Reason    string
 	writes    WriteCounts
@@ -2566,7 +2569,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
-	return []actool.CoreTool{
+	return append([]actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
@@ -2592,5 +2595,8 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		// list_untested_assets: query untested assets in this task's scope on demand
 		// (by type + paginated), and decide on supplementary testing yourself.
 		t.listUntestedAssets(),
-	}
+		// list_tools: the installed command-line tools, so a plan names tools that exist
+		// (offline, nothing can be downloaded).
+		t.listTools(),
+	}, t.knowledgeQueryTools()...)
 }

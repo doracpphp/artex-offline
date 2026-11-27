@@ -148,6 +148,13 @@ func (g *Guard) gateScope(ctx context.Context) (intercept.TargetScope, bool) {
 // rule or by the judge does not satisfy the gate; an ask and an unpinned target
 // share one approval request.
 func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event, cmd string) hook.Result {
+	// Offline mode refuses package installs in every guard, before any rule:
+	// they cannot succeed without a network (offline_install.go). Not logged to
+	// the intercept history, which would attribute a rule-less decision to the
+	// model judge; the block is in the audit ring and the tool result.
+	if offlineInstallBlock(cmd) {
+		return g.block(ev.ToolName, systemBlockMessage(offlineInstallMessage), cmd)
+	}
 	if g.targetOnly && g.interceptor != nil {
 		// The planner and the main agent run Bash too (#124, F11): the built-in
 		// deny rules apply to them, before the target gate. User rules and the

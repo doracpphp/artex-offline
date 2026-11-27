@@ -30,8 +30,10 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/knowledge"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/llm"
@@ -58,6 +60,8 @@ type Server struct {
 
 	execPriv  ExecPrivilege   // identity agent processes run under; zero keeps the server's own
 	isolation IsolationStatus // result of the startup isolation self-test (isolation.go); zero when not run
+
+	knowledge *knowledge.Store // offline knowledge search index; nil when disabled or no DB
 
 	setupMu    sync.Mutex
 	setupToken string // one-time token POST /api/auth/init requires; empty when none is active
@@ -276,6 +280,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			return a.TaskTimeoutWrapupMaxTurns, true
 		})
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools, s.execPriv) // wire visible skills/MCP + traffic/orchestration host tools into the agent toolset
+		s.initKnowledge(dataDir)                                    // offline knowledge search: build the index store + install the agent provider (before buildDomainReg)
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg)   // built-in tools table: filter per agent + override description/schema + inject defaults
 		seedPrompts(m.pg)            // seed built-in agent default prompt bodies into agent_prompts (only when empty)
@@ -284,6 +289,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
+		logOfflineState()
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // custom script tool: detect the python interpreter at boot and store it (only when empty)
 		go newScheduler(s).Run(s.ctx) // P3 trigger scheduling (scheduled/finding/goal events), custom agents only
@@ -536,6 +542,11 @@ func maxTokensResolver(cfg agent.Config) func() int {
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
 // the running engine as the GLOBAL active pair. Safe to call at runtime (UI configures LLM).
 func (s *Server) applyLLM(cfg agent.Config) error {
+	// Offline / local-LLM-only: refuse a cloud endpoint up front so the engine
+	// stays idle with a clear reason instead of failing later at dial time.
+	if err := cfg.ValidateOffline(); err != nil {
+		return err
+	}
 	var prov llm.Provider
 	var healthID int64
 	// A persisted active profile must use the same cached provider as task chains
@@ -927,6 +938,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("GET /api/settings/noise", s.noiseStatus) // current noise profile + per-host counters (no reset)
+	// Offline knowledge search: list imported packs and import a signed pack.
+	mux.HandleFunc("GET /api/knowledge/packs", s.listKnowledgePacks)
+	mux.HandleFunc("POST /api/knowledge/import", s.importKnowledgePack)
 	// Vulnerability IM push. Channels are "multi-instance + per-instance filter rules" resources, so they get their own group of
 	// REST endpoints instead of being stuffed into the flat /api/settings key-value store.
 	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
@@ -1110,9 +1124,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]any{"ok": true, "service": "artex", "version": BuildVersion}
+	// Surface offline / local-LLM-only mode so the UI can show it.
+	if offline.Enabled() {
+		out["offline"] = true
+	}
 	// The web UI shows a banner on every page for a degraded isolation (isolation.go).
 	if s.isolation.Mode != "" {
 		out["isolation"] = s.isolation
+	}
+	// Offline overlay only: "degraded" shows a banner like a degraded isolation.
+	if fw, ok := egressFirewallStatus(); ok {
+		out["egress_firewall"] = fw
 	}
 	// Opt-in only (ARTEX_UPDATE_CHECK); off, this returns "" without any request.
 	if latest := updates.newerVersion(r.Context(), time.Now(), BuildVersion); latest != "" {
@@ -1546,6 +1568,11 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "api_key required")
 		return
 	}
+	// Offline / local-LLM-only: reject a cloud endpoint before persisting it.
+	if err := cfg.ValidateOffline(); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	// Validate provider construction before persisting it as the active profile.
 	if _, err := cfg.NewProvider(); err != nil {
 		writeErr(w, 400, "provider init failed: "+err.Error())
@@ -1717,6 +1744,11 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	// Retry params do [not] go into the connection test: the test has a 30s hard timeout, and stacking the configured retry counts/long intervals on top
 	// would only turn a perfectly usable endpoint into a "timeout failure". The test asks "does this endpoint work at all"; retry pacing
 	// is a runtime concern.
+	// Offline / local-LLM-only: reject a cloud endpoint before the test request.
+	if err := cfg.ValidateOffline(); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	lat, reply, err := agent.TestConnection(r.Context(), cfg)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
@@ -4256,6 +4288,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.WebSearchBackend != nil {
 			backend = *req.WebSearchBackend
+		}
+		// Offline mode: every web-search backend is a third-party service, so an
+		// explicit request to turn it on is refused. Saving keys or the backend
+		// still works; WebSearchOpts keeps the tool off while offline anyway.
+		if req.WebSearchEnabled != nil && *req.WebSearchEnabled && offline.Enabled() {
+			writeErr(w, 400, "offline mode: web search uses a third-party service and cannot be enabled (set "+offline.Env+"=0 to allow it)")
+			return
 		}
 		if err := s.m.SetWebSearch(on, backend, req.BraveKey, req.TavilyKey, req.KeenableKey, req.WebSearchProxy); err != nil {
 			writeErr(w, 500, err.Error())

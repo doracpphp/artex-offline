@@ -14,6 +14,10 @@ import (
 // agent test suite so cross-package DELETE cleanup races with db/server
 // packages are avoided when running `go test ./...`.
 func TestMain(m *testing.M) {
+	// Offline/local-LLM-only mode defaults ON in production; the existing suite
+	// exercises cloud formats and non-local proxies, so default it OFF here.
+	// Offline-specific tests opt back in with t.Setenv(offline.Env, "1").
+	os.Setenv("ARTEX_OFFLINE", "0")
 	// Norma keeps background-task output in os.TempDir()/norma. The tests get a temp
 	// directory of their own, so a session they start never writes the host's
 	// <temp>/norma. It is world-writable and sticky like /tmp: MkdirTemp makes it

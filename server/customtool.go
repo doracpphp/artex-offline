@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/notify"
+	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -625,7 +627,11 @@ func (s *Server) httpToolTransport(ctx context.Context, key string, spec httpExe
 		return tr
 	}
 	if !intercept.GateOn(ctx) {
-		return nil
+		if !offline.Enabled() {
+			return nil
+		}
+		// Offline mode: an ungated call goes through the pinned dialer as well,
+		// which then reaches local addresses only (OFFLINE_EGRESS_BLOCKED).
 	}
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -634,7 +640,9 @@ func (s *Server) httpToolTransport(ctx context.Context, key string, spec httpExe
 	tr := base.Clone()
 	// An environment proxy would be dialled instead of the target.
 	tr.Proxy = nil
-	tr.DialContext = intercept.PinnedDialer(key, true)
+	// scoped only in a gated session: an ungated offline call may carry no
+	// scope at all, and must then be gated as offline, not failed as a lost scope.
+	tr.DialContext = intercept.PinnedDialer(key, intercept.GateOn(ctx))
 	// One request per call: no idle connection outlives the call.
 	tr.DisableKeepAlives = true
 	return tr
@@ -661,6 +669,12 @@ func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
 		return nil
 	}
 	tr := &http.Transport{Proxy: http.ProxyURL(pu)}
+	if offline.Enabled() {
+		// Offline mode: the transport dials the proxy, which must be local; a
+		// public proxy would carry the call out. The guard checks the resolved
+		// address of each connection.
+		tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, Control: offline.GuardDial}).DialContext
+	}
 	if caFile != "" {
 		// Keep recorded HTTP requests on separate connections across redirects.
 		tr.DisableKeepAlives = true

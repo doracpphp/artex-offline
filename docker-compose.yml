@@ -1,5 +1,9 @@
 services:
   postgres:
+    # For knowledge hybrid (vector) search, swap this for a pgvector image of the
+    # SAME major version, e.g. pgvector/pgvector:pg16, and set the
+    # ARTEX_KNOWLEDGE_EMBED_* vars on the artex service. The extension and the
+    # vector table are created at runtime; the stock image here runs lexical-only.
     image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-artex}
@@ -33,10 +37,33 @@ services:
     # or file capability may raise them back to root.
     security_opt:
       - "no-new-privileges:true"
+    # host.docker.internal is how the container reaches a local LLM (Ollama, a
+    # Strata gateway) on the host. Docker Desktop defines it; Linux Docker Engine
+    # needs this mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
+      # Offline / local-LLM-only mode: on unless .env sets ARTEX_OFFLINE=0 (see
+      # .env.example). Without this line the .env value never reached the
+      # container, so ARTEX_OFFLINE=0 had no effect under Docker.
+      ARTEX_OFFLINE: ${ARTEX_OFFLINE:-}
+      # Extra ranges offline mode treats as local (closed networks on public ranges).
+      ARTEX_OFFLINE_ALLOW_CIDRS: ${ARTEX_OFFLINE_ALLOW_CIDRS:-}
+      # Offline refusal of package installs in agent shells: on unless set to 0.
+      ARTEX_DENY_INSTALLS: ${ARTEX_DENY_INSTALLS:-}
+      # Offline knowledge search: on unless set to 0; a signed pack is imported in
+      # the UI. ARTEX_KNOWLEDGE_PUBKEY/KEY_ID trust a key before one is embedded.
+      ARTEX_KNOWLEDGE: ${ARTEX_KNOWLEDGE:-}
+      ARTEX_KNOWLEDGE_PUBKEY: ${ARTEX_KNOWLEDGE_PUBKEY:-}
+      ARTEX_KNOWLEDGE_KEY_ID: ${ARTEX_KNOWLEDGE_KEY_ID:-}
+      # Hybrid search (Phase 2): a local embedding model adds vector ranking. Needs a
+      # pgvector Postgres image (see the postgres service note). Lexical-only if unset.
+      ARTEX_KNOWLEDGE_EMBED_PROVIDER: ${ARTEX_KNOWLEDGE_EMBED_PROVIDER:-}
+      ARTEX_KNOWLEDGE_EMBED_MODEL: ${ARTEX_KNOWLEDGE_EMBED_MODEL:-}
+      ARTEX_KNOWLEDGE_EMBED_ENDPOINT: ${ARTEX_KNOWLEDGE_EMBED_ENDPOINT:-}
       # Parts, not a pasted URL. PostgresDSN percent-encodes the password, so a
       # value with / ? % @ : or a space still connects. ARTEX_PG_DSN, when set,
       # would override these and is responsible for its own escaping.

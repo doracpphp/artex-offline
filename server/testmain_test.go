@@ -14,6 +14,10 @@ import (
 // server test suite so cross-package DELETE cleanup races with db/agent
 // packages are avoided when running `go test ./...`.
 func TestMain(m *testing.M) {
+	// Offline/local-LLM-only mode defaults ON in production; much of this suite
+	// configures cloud endpoints and the public-only model-list guard, so default
+	// it OFF here. Offline-specific tests opt back in with t.Setenv("ARTEX_OFFLINE", "1").
+	os.Setenv("ARTEX_OFFLINE", "0")
 	// The executor tests (execpriv_root_linux_test.go) start this binary as the bash
 	// shim and as the MCP drop shim, the way cmd/artex's main does.
 	RunExecShimIfRequested(os.Args)

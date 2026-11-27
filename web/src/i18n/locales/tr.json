@@ -827,6 +827,7 @@
   "Each request is decided on its own; one that cannot be decided stays pending and is listed.": "Her istek ayrı ayrı karara bağlanır; karara bağlanamayan istek beklemede kalır ve listelenir.",
   "Earlier history": "Önceki geçmiş",
   "earlier Q&A summarized": "önceki soru-cevaplar özetlendi",
+  "Egress firewall is not enforced: tools in agent shells that ignore the proxy settings can reach any network the host routes to.": "Çıkış güvenlik duvarı uygulanmıyor: ajan kabuklarında proxy ayarlarını yok sayan araçlar, ana makinenin yönlendirebildiği her ağa ulaşabilir.",
   "Edit": "Düzenle",
   "Edit {key}": "Düzenle: {key}",
   "Edit asset interception rule": "Varlık yakalama kuralını düzenle",

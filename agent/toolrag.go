@@ -31,6 +31,11 @@ var toolRAGCore = map[string]bool{
 	"record_fact": true, "insert_assets": true, "report_finding": true, "list_findings": true,
 	"graph_overview": true, "node_detail": true, "add_intent": true, "steer_work": true,
 	"ask_operator": true, "prove_goal": true, "goal_met": true, "list_assets": true,
+	"list_tools": true,
+	// knowledge search: never project these away; they are the offline substitute
+	// for web search (docs/offline-knowledge-search.md §4.3).
+	"search_exploits": true, "lookup_cve": true, "lookup_software": true,
+	"search_technique": true, "read_knowledge": true, "copy_knowledge_file": true,
 }
 
 type toolQueryKey struct{}

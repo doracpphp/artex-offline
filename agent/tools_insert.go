@@ -682,7 +682,10 @@ func splitLines(s string) []string {
 
 // WorkerTools returns the tool set for a work agent.
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
-	return []actool.CoreTool{
+	return append([]actool.CoreTool{
+		// list_tools: the installed command-line tools; pick one of these instead of
+		// downloading (offline, installs are refused).
+		t.listTools(),
 		// list_findings stays: check the task's confirmed findings before reporting, to
 		// avoid reporting the same finding twice.
 		t.listFindings(),
@@ -715,13 +718,18 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// planner/main (reading context, cross-work retrospection are planning duties; a
 		// worker only executes and writes back its single intent):
 		// list_facts / list_companies / list_worker_traces.
-	}
+	},
+		// knowledge search: the query tools plus copy_knowledge_file (worker-only:
+		// it writes into the run's working directory for Bash/file tools to use).
+		append(t.knowledgeQueryTools(), t.copyKnowledgeFile())...)
 }
 
 // MainAgentTools returns the human-interface tool set.
 func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
+		// list_tools: the main agent runs Bash too; it should know what is installed.
+		t.listTools(),
 		t.expandDigest(), // cold-digest §6.1
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.addHint(), t.addIntent(),
 		// steer_work: the human can inject a course-correction instruction into a running

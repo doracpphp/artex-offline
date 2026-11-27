@@ -420,7 +420,7 @@ func workerSystemParts(proxyAddr, caCert, dataDir, runDir string) (staticPart, d
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	staticPart = body + untrustedContentTail(body) + workerTrafficBlock(caCert != "")
+	staticPart = body + untrustedContentTail(body) + workerTrafficBlock(caCert != "") + offlineBlock()
 	dynamicHead = workerArtifactSpec(runDir) + noiseProfileBlock()
 	return staticPart, dynamicHead
 }
@@ -543,7 +543,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
-	tsx.SetWorkBase(w.workDir)          // ingest_bbot reads its file under the same base as the file tools below
+	tsx.SetWorkBase(w.workDir)          // ingest_bbot reads its file under the same base as the file tools below; copy_knowledge_file writes here
+	tsx.ApplyKnowledge()                // offline knowledge-search tools (search_exploits/lookup_cve/...)
 	tsx.SetOwnerNode(intent.ID)         // assets this worker discovers anchor to its intent → visible to the task
 	tsx.SetEnrich(enr)                  // async DNS/HTTP auto-completion for assets this worker writes
 	tsx.SetNotifyFinding(notifyFinding) // when report_finding lands, wake the planner on the spot with "which intent + finding"

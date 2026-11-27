@@ -27,6 +27,11 @@ func TestMain(m *testing.M) {
 	// Let regular cases reach the local fake receivers; SSRF cases clear it
 	// temporarily themselves.
 	_ = os.Setenv(AllowLocalTargetsEnv, "1")
+	// Offline/local-LLM-only mode defaults ON in production and inverts the dial
+	// guard (local allowed, public refused). The existing SSRF suite asserts the
+	// original online behavior, so default offline OFF here; the offline-specific
+	// test opts back in with t.Setenv("ARTEX_OFFLINE", "1").
+	_ = os.Setenv("ARTEX_OFFLINE", "0")
 	os.Exit(m.Run())
 }
 
