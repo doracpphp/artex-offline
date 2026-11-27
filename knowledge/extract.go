@@ -3,6 +3,7 @@ package knowledge
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -201,12 +202,13 @@ func withinDir(dir, target string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, "../") && rel != "..")
 }
 
-// VerifyPackFile reads the manifest and signature from a pack file, verifies the
-// signature against the trusted key named by the manifest's KeyID, and returns
-// the validated manifest. It reads only the two metadata entries, not the data
-// files, so it is cheap to call before deciding to import. trust resolves a
-// key_id to its public key (production: TrustedKey; tests pass a throwaway key).
-func VerifyPackFile(path string, trust func(keyID string) ([]byte, error)) (*Manifest, error) {
+// VerifyPackFile reads the manifest and signature from a pack file and verifies
+// the signature against the trusted keys BEFORE the manifest is parsed
+// (VerifyRaw), returning the verified, validated manifest. It reads only the two
+// metadata entries, not the data files, so it is cheap to call before deciding
+// to import. keys is the trusted key set (production: TrustedKeys; tests pass a
+// throwaway key).
+func VerifyPackFile(path string, keys map[string]ed25519.PublicKey) (*VerifiedManifest, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -216,21 +218,7 @@ func VerifyPackFile(path string, trust func(keyID string) ([]byte, error)) (*Man
 	if err != nil {
 		return nil, err
 	}
-	m, err := ParseManifest(manifestBytes)
-	if err != nil {
-		return nil, err
-	}
-	if err := m.Validate(); err != nil {
-		return nil, err
-	}
-	pub, err := trust(m.KeyID)
-	if err != nil {
-		return nil, err
-	}
-	if err := VerifyManifest(pub, manifestBytes, sig); err != nil {
-		return nil, err
-	}
-	return m, nil
+	return VerifyRaw(keys, manifestBytes, sig)
 }
 
 // ExtractPackFile extracts a pack file's data files under destDir, given its

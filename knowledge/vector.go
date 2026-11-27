@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 )
@@ -43,11 +44,17 @@ func ensureVectorSchema(ctx context.Context, db *sql.DB, dim int, model string) 
 		return err
 	}
 	if exists && cur != dim {
-		// Model/dimension changed: drop the cache and rebuild at the new dimension.
+		// Dimension changed: drop the cache and rebuild at the new dimension.
 		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS kb_embeddings`); err != nil {
 			return err
 		}
 		exists = false
+	}
+	if exists {
+		// Same dimension, different model: the vectors are not comparable.
+		if err := dropStaleEmbeddings(ctx, db, model); err != nil {
+			return err
+		}
 	}
 	if !exists {
 		// vector(dim) needs a literal dimension, so it is interpolated (validated above).
@@ -65,7 +72,28 @@ func ensureVectorSchema(ctx context.Context, db *sql.DB, dim int, model string) 
 			return fmt.Errorf("create hnsw index: %w", err)
 		}
 	}
-	_ = model
+	return nil
+}
+
+// dropStaleEmbeddings deletes every stored vector made by a model other than
+// model. The vectors are a derived cache: the worker rebuilds them.
+func dropStaleEmbeddings(ctx context.Context, db *sql.DB, model string) error {
+	exists, err := tableExists(ctx, db, "kb_embeddings")
+	if err != nil || !exists {
+		return err
+	}
+	var n int
+	err = db.QueryRowContext(ctx, `SELECT 1 FROM kb_embeddings WHERE model <> $1 LIMIT 1`, model).Scan(&n)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM kb_embeddings WHERE model <> $1`, model); err != nil {
+		return fmt.Errorf("drop stale embeddings: %w", err)
+	}
+	log.Printf("[knowledge] embedding model changed to %s: stale vectors dropped, the vector index is rebuilt in the background", model)
 	return nil
 }
 

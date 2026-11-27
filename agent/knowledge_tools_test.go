@@ -45,8 +45,15 @@ func (f *fakeKnowledge) LookupSoftware(_ context.Context, p, v, ver string, _ in
 func (f *fakeKnowledge) ReadKnowledge(_ context.Context, ref string, chunk int) (knowledge.KnowledgeChunk, bool, error) {
 	return f.chunk, f.chunkOK, nil
 }
-func (f *fakeKnowledge) DocumentFilePath(_ context.Context, ref string) (string, string, string, bool, error) {
-	return f.filePath, "artex-core", f.fileSrc, f.fileOK, nil
+func (f *fakeKnowledge) ReadDocumentFile(_ context.Context, ref string, maxBytes int64) ([]byte, string, string, bool, error) {
+	if !f.fileOK {
+		return nil, "", "", false, nil
+	}
+	data, err := os.ReadFile(f.filePath)
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	return data, "artex-core", f.fileSrc, true, nil
 }
 
 func callTool(t *testing.T, tool actool.CoreTool, input string) actool.Result {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,7 +20,8 @@ import (
 // Offline knowledge search wiring (docs/offline-knowledge-search.md). The store
 // indexes imported packs; the agent provider lets each run's ToolSet reach it,
 // and a cached availability flag lets ToolResolve drop the tools when no pack is
-// active. Import is operator-driven (System → Knowledge, or the CLI/API here).
+// active. Import is operator-driven, through POST /api/knowledge/import (there
+// is no UI for it yet).
 
 // knowledgeAvailable caches whether a pack is active, so ToolResolve (run on
 // every agent build) does not query the DB each time. It is refreshed at init
@@ -39,6 +41,18 @@ func (s *Server) initKnowledge(dataDir string) {
 		return
 	}
 	store := knowledge.NewStore(s.m.pg.DB, cfg)
+	// Trigram indexes speed up the ILIKE fallback; best effort (no rights, or a
+	// Postgres without contrib, only makes that fallback slower).
+	if err := store.EnsureTrigramIndexes(s.ctx); err != nil {
+		log.Printf("[knowledge] pg_trgm unavailable (%v): identifier and partial-name search use sequential scans", err)
+	}
+	if keys, err := knowledge.TrustedKeyList(); err != nil {
+		log.Printf("[knowledge] signing keys: %v (imports are refused until this is fixed)", err)
+	} else {
+		for _, k := range keys {
+			log.Printf("[knowledge] trusted signing key %s (%s): sha256 %s", k.KeyID, k.Source, k.Fingerprint)
+		}
+	}
 	// Optional local embedding model for hybrid (lexical + vector) search. Without
 	// one, or without pgvector, search is lexical-only. An invalid endpoint (e.g.
 	// a cloud host in offline mode) is logged and the feature stays lexical.
@@ -62,7 +76,7 @@ func (s *Server) initKnowledge(dataDir string) {
 			store.EmbedActivePackAsync()
 		}
 	} else {
-		log.Printf("[knowledge] enabled; no pack imported yet (import one under System → Knowledge or with POST /api/knowledge/import)")
+		log.Printf("[knowledge] enabled; no pack imported yet (import one with POST /api/knowledge/import, see docs/offline-knowledge-search.md)")
 	}
 	if embedder != nil {
 		cfg, _ := knowledge.LoadEmbedConfig()
@@ -85,20 +99,14 @@ func anyActivePack(ctx context.Context, store *knowledge.Store) (string, bool, e
 	return "", false, nil
 }
 
-// knowledgeTrust resolves a pack's key_id to its trusted public key.
-func knowledgeTrust(keyID string) ([]byte, error) {
-	pub, err := knowledge.TrustedKey(keyID)
-	if err != nil {
-		return nil, err
-	}
-	return pub, nil
-}
-
 // maxKnowledgePackBytes caps a streamed pack upload. Packs can be several GB
 // (docs §5); this is a generous ceiling against an accidental huge upload.
 const maxKnowledgePackBytes = 12 << 30
 
-// listKnowledgePacks: GET /api/knowledge/packs → the imported packs.
+// listKnowledgePacks: GET /api/knowledge/packs → the imported packs (each with
+// the fingerprint of the key that verified it), the per-pack-id key pins, and
+// the trusted signing keys with their fingerprints, so an operator can compare
+// them out of band.
 func (s *Server) listKnowledgePacks(w http.ResponseWriter, r *http.Request) {
 	if s.knowledge == nil {
 		writeJSON(w, 200, map[string]any{"enabled": false, "packs": []any{}})
@@ -109,7 +117,18 @@ func (s *Server) listKnowledgePacks(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"enabled": true, "active": knowledgeActive.Load(), "packs": packs})
+	pins, err := s.knowledge.KeyPins(r.Context())
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	out := map[string]any{"enabled": true, "active": knowledgeActive.Load(), "packs": packs, "key_pins": pins}
+	if keys, err := knowledge.TrustedKeyList(); err != nil {
+		out["trusted_keys_error"] = err.Error()
+	} else {
+		out["trusted_keys"] = keys
+	}
+	writeJSON(w, 200, out)
 }
 
 // importKnowledgePack: POST /api/knowledge/import imports a signed pack and
@@ -121,12 +140,25 @@ func (s *Server) listKnowledgePacks(w http.ResponseWriter, r *http.Request) {
 //     application/gzip or octet-stream); it is written to the inbox and imported.
 //
 // ?allow_downgrade=1 permits importing a version older than the active one.
+// ?repin=1 accepts a pack signed by a key other than the one its pack id was
+// pinned to at first import (an intended key rotation), and pins the new key.
+//
+// The import runs synchronously (up to 30 minutes for a multi-GB pack); a
+// second import while one runs is refused with 409.
 func (s *Server) importKnowledgePack(w http.ResponseWriter, r *http.Request) {
 	if s.knowledge == nil {
 		writeErr(w, 400, "knowledge search is disabled ("+knowledge.EnabledEnv+"=0)")
 		return
 	}
-	opt := knowledge.ImportOptions{AllowDowngrade: truthy(r.URL.Query().Get("allow_downgrade"))}
+	keys, err := knowledge.TrustedKeys()
+	if err != nil {
+		writeErr(w, 400, "knowledge signing keys: "+err.Error())
+		return
+	}
+	opt := knowledge.ImportOptions{
+		AllowDowngrade: truthy(r.URL.Query().Get("allow_downgrade")),
+		Repin:          truthy(r.URL.Query().Get("repin")),
+	}
 	cfg := s.knowledge.Config()
 	inbox := filepath.Join(cfg.Dir, "inbox")
 
@@ -176,14 +208,18 @@ func (s *Server) importKnowledgePack(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Minute)
 	defer cancel()
-	res, err := s.knowledge.Import(ctx, packPath, knowledgeTrust, opt)
+	res, err := s.knowledge.Import(ctx, packPath, keys, opt)
+	if errors.Is(err, knowledge.ErrImportBusy) {
+		writeErr(w, 409, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, 400, "import failed: "+err.Error())
 		return
 	}
 	knowledgeActive.Store(true)
-	log.Printf("[knowledge] imported pack %s %s: %d exploits, %d CVEs, %d docs, %d templates (%d skipped)",
-		res.PackID, res.Version, res.Exploits, res.CVEs, res.Docs, res.Templates, res.Skipped)
+	log.Printf("[knowledge] imported pack %s %s (key %s, sha256 %s): %d exploits, %d CVEs, %d docs, %d templates (%d skipped)",
+		res.PackID, res.Version, res.KeyID, res.KeyFingerprint, res.Exploits, res.CVEs, res.Docs, res.Templates, res.Skipped)
 	writeJSON(w, 200, res)
 }
 

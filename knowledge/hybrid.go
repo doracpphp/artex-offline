@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sort"
 	"time"
@@ -148,8 +149,9 @@ JOIN kb_packs p ON p.id = d.pack_id AND p.active
 WHERE d.kind = ANY($2)
   AND ($3 = '' OR d.meta->>'type' = $3)
   AND ($4 = '' OR d.meta->>'platform' = $4)
+  AND e.model = $6
 ORDER BY e.embedding <=> $1::vector
-LIMIT $5`, formatVector(qv), pgTextArray(kinds), typ, platform, limit)
+LIMIT $5`, formatVector(qv), pgTextArray(kinds), typ, platform, limit, s.embedder.Model())
 	if err != nil {
 		return nil, err
 	}
@@ -189,16 +191,25 @@ func (s *Store) vectorReady(ctx context.Context) bool {
 	if !s.vecReady {
 		return false
 	}
-	// The table may not exist until the first embedding batch created it.
+	// The table may not exist until the first embedding batch created it, and
+	// vectors of a previous model are not comparable with this model's query
+	// vectors: only this model's rows count.
 	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM kb_embeddings LIMIT 1`).Scan(&n); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM kb_embeddings WHERE model=$1 LIMIT 1`, s.embedder.Model()).Scan(&n); err != nil {
 		return false
 	}
 	return true
 }
 
+// queryEmbedTimeout bounds the embedding of one search query, so a slow or hung
+// local embedder delays a tool call by seconds, not by the embedder client's
+// batch timeout, before search falls back to lexical.
+const queryEmbedTimeout = 15 * time.Second
+
 // embedQuery embeds a single query string.
 func (s *Store) embedQuery(ctx context.Context, query string) ([]float32, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryEmbedTimeout)
+	defer cancel()
 	vecs, err := s.embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, err
@@ -251,6 +262,11 @@ func (s *Store) embedActivePack(ctx context.Context) error {
 		log.Printf("[knowledge] pgvector not available; vector search disabled (lexical only)")
 		return nil
 	}
+	// A changed embedding model makes every stored vector stale, even at the
+	// same dimension: drop them so the active pack is re-embedded with this one.
+	if err := dropStaleEmbeddings(ctx, s.db, s.embedder.Model()); err != nil {
+		return err
+	}
 	schemaReady := false
 	total := 0
 	for {
@@ -269,6 +285,9 @@ func (s *Store) embedActivePack(ctx context.Context) error {
 			return errNoEmbedding
 		}
 		dim := len(vecs[0])
+		if s.vecDimKnown() && dim != s.currentDim() {
+			return fmt.Errorf("embedding model %s now returns %d-dimensional vectors, the index holds %d; restart ARTEX to rebuild the vector index", s.embedder.Model(), dim, s.currentDim())
+		}
 		if !schemaReady {
 			if err := ensureVectorSchema(ctx, s.db, dim, s.embedder.Model()); err != nil {
 				return err
@@ -278,10 +297,16 @@ func (s *Store) embedActivePack(ctx context.Context) error {
 			s.vecMu.Unlock()
 			schemaReady = true
 		}
-		if err := s.insertEmbeddings(ctx, ids, vecs, dim); err != nil {
+		n, err := s.insertEmbeddings(ctx, ids, vecs, dim)
+		if err != nil {
 			return err
 		}
-		total += len(ids)
+		if n < len(ids) {
+			// The skipped chunks stay unembedded and would be fetched again
+			// forever: stop instead, and say why.
+			return fmt.Errorf("embedding model %s returned %d of %d vectors at the index dimension %d; vector indexing stopped (search stays lexical for the rest)", s.embedder.Model(), n, len(ids), dim)
+		}
+		total += n
 	}
 	if total > 0 {
 		log.Printf("[knowledge] embedded %d chunks with %s; vector search is active", total, s.embedder.Model())
@@ -327,32 +352,47 @@ LIMIT $1`
 	return ids, bodies, rows.Err()
 }
 
-// insertEmbeddings writes a batch of vectors. A vector of the wrong dimension
-// (an inconsistent model response) is skipped rather than failing the batch.
-func (s *Store) insertEmbeddings(ctx context.Context, ids []int64, vecs [][]float32, dim int) error {
+// insertEmbeddings writes a batch of vectors and returns how many it wrote. A
+// vector of the wrong dimension (an inconsistent model response) is skipped;
+// the caller stops when anything was skipped (embedActivePack).
+func (s *Store) insertEmbeddings(ctx context.Context, ids []int64, vecs [][]float32, dim int) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO kb_embeddings(chunk_id, model, embedding) VALUES ($1,$2,$3::vector)
 		 ON CONFLICT (chunk_id) DO UPDATE SET model=EXCLUDED.model, embedding=EXCLUDED.embedding`)
 	if err != nil {
 		tx.Rollback()
-		return err
+		return 0, err
 	}
 	defer stmt.Close()
 	model := s.embedder.Model()
+	n := 0
 	for i, id := range ids {
 		if len(vecs[i]) != dim {
 			continue
 		}
 		if _, err := stmt.ExecContext(ctx, id, model, formatVector(vecs[i])); err != nil {
 			tx.Rollback()
-			return err
+			return 0, err
 		}
+		n++
 	}
-	return tx.Commit()
+	return n, tx.Commit()
+}
+
+func (s *Store) vecDimKnown() bool {
+	s.vecMu.Lock()
+	defer s.vecMu.Unlock()
+	return s.vecDim > 0
+}
+
+func (s *Store) currentDim() int {
+	s.vecMu.Lock()
+	defer s.vecMu.Unlock()
+	return s.vecDim
 }
 
 func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {

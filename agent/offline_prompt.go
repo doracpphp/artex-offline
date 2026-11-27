@@ -21,14 +21,15 @@ This deployment has no external network: only local and LAN addresses are reacha
 const knowledgePromptLine = "- To look something up — an exploit, a CVE, a product's known vulnerabilities, an attack technique — use the local knowledge tools (search_exploits, lookup_cve, lookup_software, search_technique, read_knowledge), not the web. Cite the source they return in any finding.\n"
 
 // offlineBlock returns the offline-mode prompt block, plus the knowledge line
-// when a pack is active. It returns "" only when offline mode is off and no
-// knowledge pack is available.
-func offlineBlock() string {
+// when a pack is active and the role has the knowledge tools (planner and
+// worker; the main agent and chat do not, and must not be told to call them).
+// It returns "" when there is nothing to say.
+func offlineBlock(withKnowledge bool) string {
 	block := ""
 	if offline.Enabled() {
 		block = offlinePromptBlock
 	}
-	if KnowledgeAvailable() {
+	if withKnowledge && KnowledgeAvailable() {
 		if block == "" {
 			block = "\n"
 		}
