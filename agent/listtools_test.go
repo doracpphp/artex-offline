@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/offline"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 func writeFile(t *testing.T, path, body string, mode os.FileMode) {

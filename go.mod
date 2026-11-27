@@ -1,4 +1,4 @@
-module github.com/Autumn-27/artex
+module github.com/doracpphp/artex-offline
 
 go 1.26.11
 

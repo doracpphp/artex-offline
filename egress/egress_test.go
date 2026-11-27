@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/intercept"
+	"github.com/doracpphp/artex-offline/intercept"
 )
 
 // open is a profile that does not limit, for the tests of one lever.

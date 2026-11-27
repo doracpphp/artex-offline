@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/archivestore"
-	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/archivestore"
+	pgdb "github.com/doracpphp/artex-offline/db"
 )
 
 // An S3-compatible endpoint that answers CreateMultipartUpload with 200 and no

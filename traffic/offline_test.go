@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // offlineResolver answers from a fixed table; any other name is NXDOMAIN.

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
-	pgdb "github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/traffic"
+	"github.com/doracpphp/artex-offline/agent"
+	pgdb "github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/traffic"
 )
 
 func TestSeedAssociatesTargetAssetWithTask(t *testing.T) {

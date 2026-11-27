@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 type offlineNames map[string][]string

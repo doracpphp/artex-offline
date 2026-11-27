@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/intercept"
-	"github.com/Autumn-27/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/intercept"
+	"github.com/doracpphp/artex-offline/traffic"
 )
 
 // The gate wired into the server: the exemption API, the exemptions derived

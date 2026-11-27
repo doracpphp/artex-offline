@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/traffic/rewrite"
+	"github.com/doracpphp/artex-offline/traffic/rewrite"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
 

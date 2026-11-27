@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
+	"github.com/doracpphp/artex-offline/agent"
 )
 
 // PG: on an existing database whose stored record_fact row predates the source

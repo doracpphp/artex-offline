@@ -4,8 +4,8 @@ import (
 	"context"
 	"log"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/llmrec"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/llmrec"
 )
 
 // Hierarchical run budgets (agent/budget.go), off unless an ARTEX_*_BUDGET_* env

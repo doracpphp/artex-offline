@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // Embedding backs the vector half of hybrid search (docs §4.2, Phase 2). A local

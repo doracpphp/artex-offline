@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 // A triage profile is a stored base_url, so the decision endpoint has to pass the

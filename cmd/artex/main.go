@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/config"
-	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/server"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/config"
+	"github.com/doracpphp/artex-offline/egress"
+	"github.com/doracpphp/artex-offline/server"
 )
 
 // configSnapshot is the single startup log line describing the effective

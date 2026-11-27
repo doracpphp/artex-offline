@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Autumn-27/artex/archivestore"
-	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/archivestore"
+	pgdb "github.com/doracpphp/artex-offline/db"
 )
 
 func TestRemoteArchiveLifecycle(t *testing.T) {

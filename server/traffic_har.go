@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/Autumn-27/artex/traffic"
+	"github.com/doracpphp/artex-offline/traffic"
 )
 
 func parseTrafficPageQuery(q url.Values) traffic.PageQuery {

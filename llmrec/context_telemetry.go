@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 // ContextTelemetryEnv switches per-call context size telemetry into llm_context.

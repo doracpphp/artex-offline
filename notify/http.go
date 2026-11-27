@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // allowLocalTargets decides whether delivering messages to loopback / link-local

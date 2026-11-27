@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/config"
-	"github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/config"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 // ctxKey is the unexported context key type to avoid collisions.

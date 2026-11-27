@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/agent"
 )
 
 func TestRecordFactInputSchemaUpgrade(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 type readyTestConnector struct {

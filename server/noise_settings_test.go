@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/egress"
+	"github.com/doracpphp/artex-offline/egress"
 )
 
 func TestNoiseProfileSettingHTTP(t *testing.T) {

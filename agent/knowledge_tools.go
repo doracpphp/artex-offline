@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Autumn-27/artex/knowledge"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/knowledge"
 )
 
 // Offline knowledge-search tools (docs/offline-knowledge-search.md §4.3). They

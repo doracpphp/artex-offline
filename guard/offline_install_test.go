@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/hook"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 func TestOfflineInstallBlock(t *testing.T) {

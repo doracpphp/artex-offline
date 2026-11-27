@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/artex/traffic/hookvm"
-	"github.com/Autumn-27/artex/traffic/rewrite"
+	"github.com/doracpphp/artex-offline/traffic/hookvm"
+	"github.com/doracpphp/artex-offline/traffic/rewrite"
 )
 
 // Opt-in kill switch for constrained Go tampering hooks (P4.2).

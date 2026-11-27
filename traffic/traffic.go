@@ -31,11 +31,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/offline"
-	"github.com/Autumn-27/artex/traffic/rewrite"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/offline"
+	"github.com/doracpphp/artex-offline/traffic/rewrite"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	_ "modernc.org/sqlite"
 )

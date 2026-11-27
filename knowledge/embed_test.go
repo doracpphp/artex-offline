@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // embedServer is a fake embedding server for both wire formats, returning a

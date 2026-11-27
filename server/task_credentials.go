@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/notify"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/notify"
 )
 
 // Task credential HTTP handlers (#3). The agent-side write path is the

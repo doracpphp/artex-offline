@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 // An operator may exempt a private unicast IP literal, never a loopback,

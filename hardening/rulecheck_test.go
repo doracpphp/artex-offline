@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/intercept"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/intercept"
 )
 
 // parseHardeningRules extracts the [hardening] INSERT tuples directly from

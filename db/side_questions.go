@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Autumn-27/artex/sidequestion"
+	"github.com/doracpphp/artex-offline/sidequestion"
 	"github.com/google/uuid"
 )
 

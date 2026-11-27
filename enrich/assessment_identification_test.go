@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Autumn-27/artex/config"
-	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/intercept"
+	"github.com/doracpphp/artex-offline/config"
+	"github.com/doracpphp/artex-offline/egress"
+	"github.com/doracpphp/artex-offline/intercept"
 )
 
 func TestAssessmentEnrichmentUserAgent(t *testing.T) {

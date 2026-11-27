@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/Autumn-27/artex/offline"
+import "github.com/doracpphp/artex-offline/offline"
 
 // offlinePromptBlock is the code-owned prompt block of offline mode
 // (docs/offline-toolbox.md §6.1). It is appended after the editable body, like

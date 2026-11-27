@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 // fakeStore is the gate's store without a database. approve and revoke do what

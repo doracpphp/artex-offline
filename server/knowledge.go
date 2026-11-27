@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/knowledge"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/knowledge"
 )
 
 // Offline knowledge search wiring (docs/offline-knowledge-search.md). The store

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
+	"github.com/doracpphp/artex-offline/agent"
 )
 
 // A child process spawned after startup must not see the startup secrets, while

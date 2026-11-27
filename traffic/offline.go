@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
 

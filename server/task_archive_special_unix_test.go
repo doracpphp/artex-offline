@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"testing"
 
-	pgdb "github.com/Autumn-27/artex/db"
+	pgdb "github.com/doracpphp/artex-offline/db"
 )
 
 // A named pipe or a socket left in the task workspace by a command must not

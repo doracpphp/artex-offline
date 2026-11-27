@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/evidence"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/evidence"
 )
 
 type failingFindingRecorder struct{}

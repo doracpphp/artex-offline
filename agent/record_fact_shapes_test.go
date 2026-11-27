@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 // Synthetic replay of the record_fact call shapes a model produces, replayed

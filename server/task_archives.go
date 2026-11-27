@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/archivestore"
-	pgdb "github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/traffic"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/archivestore"
+	pgdb "github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/traffic"
 )
 
 const taskArchivePollInterval = 2 * time.Second

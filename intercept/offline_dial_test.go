@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/offline"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // offlineNames is a resolver for the offline tests: a fixed table, and NXDOMAIN

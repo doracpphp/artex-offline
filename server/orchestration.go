@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/intercept"
 )
 
 // jsonResult marshals v to a JSON tool result.

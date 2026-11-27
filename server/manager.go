@@ -17,17 +17,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/config"
-	pgdb "github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/enrich"
-	"github.com/Autumn-27/artex/guard"
-	"github.com/Autumn-27/artex/intercept"
-	"github.com/Autumn-27/artex/offline"
-	"github.com/Autumn-27/artex/traffic"
-	"github.com/Autumn-27/artex/traffic/rewrite"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/config"
+	pgdb "github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/egress"
+	"github.com/doracpphp/artex-offline/enrich"
+	"github.com/doracpphp/artex-offline/guard"
+	"github.com/doracpphp/artex-offline/intercept"
+	"github.com/doracpphp/artex-offline/offline"
+	"github.com/doracpphp/artex-offline/traffic"
+	"github.com/doracpphp/artex-offline/traffic/rewrite"
 )
 
 // Task is one engagement: a description + goal + its own exploration store,

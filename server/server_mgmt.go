@@ -29,13 +29,13 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/intercept"
-	"github.com/Autumn-27/artex/notify"
-	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/skill"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/intercept"
+	"github.com/doracpphp/artex-offline/notify"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // validSkillName checks the agentskills.io name constraints, widened so a skill can

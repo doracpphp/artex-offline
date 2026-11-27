@@ -12,11 +12,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/guard"
-	"github.com/Autumn-27/artex/intercept"
-	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/guard"
+	"github.com/doracpphp/artex-offline/intercept"
+	"github.com/doracpphp/artex-offline/llmrec"
 )
 
 // judgeWorkerLane is the usage-ledger "worker" label for intercept fallback-judge

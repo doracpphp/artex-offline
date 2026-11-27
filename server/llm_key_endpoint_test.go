@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/db"
+	"github.com/doracpphp/artex-offline/agent"
+	"github.com/doracpphp/artex-offline/db"
 )
 
 func TestSameLLMEndpoint(t *testing.T) {

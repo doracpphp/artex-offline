@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/egress"
+	"github.com/doracpphp/artex-offline/egress"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
 

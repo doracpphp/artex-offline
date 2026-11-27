@@ -19,15 +19,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/artex/config"
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/guard"
-	"github.com/Autumn-27/artex/intercept"
-	"github.com/Autumn-27/artex/notify"
-	"github.com/Autumn-27/artex/offline"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/doracpphp/artex-offline/config"
+	"github.com/doracpphp/artex-offline/db"
+	"github.com/doracpphp/artex-offline/egress"
+	"github.com/doracpphp/artex-offline/guard"
+	"github.com/doracpphp/artex-offline/intercept"
+	"github.com/doracpphp/artex-offline/notify"
+	"github.com/doracpphp/artex-offline/offline"
 )
 
 // This file implements the custom tool executor (docs/custom-tool-design.md). tools rows
