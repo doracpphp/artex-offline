@@ -27,6 +27,7 @@ type ImportResult struct {
 	CVEs           int    `json:"cves"`
 	Docs           int    `json:"docs"`
 	Templates      int    `json:"templates"`
+	Techniques     int    `json:"techniques"`
 	Skipped        int    `json:"skipped"`
 	// Carried is how many chunk vectors were reused from the previous version
 	// (unchanged chunk text), so they need no new embedding.
@@ -274,7 +275,7 @@ DELETE FROM kb_documents WHERE pack_id IN (SELECT id FROM kb_packs WHERE pack_id
 // database indexer, or the builder's chunk collector (embedfile.go), so both
 // see exactly the same documents and chunks.
 type docSink interface {
-	addDocument(kind, extID, sourcePath, title string, cveIDs, cpeTags []string, meta any, bodyText string) (int64, error)
+	addDocument(d document) (int64, error)
 	addCPEMatch(docID int64, m CPEMatch) error
 }
 
@@ -338,6 +339,18 @@ func indexPack(ix docSink, v packView) (*ImportResult, error) {
 		res.Exploits, res.Skipped = n, skipped
 	}
 
+	// ATT&CK: every bundle under attack/ ending in .json.
+	for _, p := range v.paths {
+		if !strings.HasPrefix(p, attackPrefix) || !strings.HasSuffix(p, ".json") {
+			continue
+		}
+		n, err := indexAttackFile(ix, v.resolve(p), AttackDomain(p))
+		if err != nil {
+			return nil, fmt.Errorf("index %s: %w", p, err)
+		}
+		res.Techniques += n
+	}
+
 	// Technique docs and templates: every file under docs/ or templates/.
 	for _, p := range v.paths {
 		switch {
@@ -373,7 +386,7 @@ func indexNVDFile(ix docSink, path string) (int, error) {
 				cpeTags = append(cpeTags, p.Vendor+":"+p.Product)
 			}
 		}
-		docID, err := ix.addDocument("cve", c.ID, "", c.Description, []string{c.ID}, dedupe(cpeTags), meta, "")
+		docID, err := ix.addDocument(document{kind: "cve", extID: c.ID, title: c.Description, cveIDs: []string{c.ID}, cpeTags: dedupe(cpeTags), meta: meta})
 		if err != nil {
 			return err
 		}
@@ -413,7 +426,7 @@ func indexExploitDB(ix docSink, v packView) (indexed, skipped int, err error) {
 			Type: ex.Type, Platform: ex.Platform, Date: ex.DatePub,
 			Port: ex.Port, Author: ex.Author, Verified: ex.Verified,
 		}
-		if _, err := ix.addDocument("exploit", ex.EDBID, sourcePath, ex.Description, ex.CVEs, nil, em, body); err != nil {
+		if _, err := ix.addDocument(document{kind: "exploit", extID: ex.EDBID, sourcePath: sourcePath, title: ex.Description, cveIDs: ex.CVEs, meta: em, body: body}); err != nil {
 			return 0, 0, err
 		}
 		indexed++
@@ -426,7 +439,7 @@ func indexExploitDB(ix docSink, v packView) (indexed, skipped int, err error) {
 func indexTextFile(ix docSink, kind, file, p string) error {
 	body := readBodyFile(file, maxDocBytes)
 	title := docTitle(p, body)
-	_, err := ix.addDocument(kind, "", p, title, nil, nil, nil, body)
+	_, err := ix.addDocument(document{kind: kind, sourcePath: p, title: title, body: body})
 	return err
 }
 
@@ -442,7 +455,7 @@ func indexTemplateFile(ix docSink, file, p string) error {
 		t, ok = ParseNucleiTemplate([]byte(body))
 	}
 	if !ok {
-		_, err := ix.addDocument("template", "", p, docTitle(p, body), nil, nil, nil, body)
+		_, err := ix.addDocument(document{kind: "template", sourcePath: p, title: docTitle(p, body), body: body})
 		return err
 	}
 	title := t.Name
@@ -454,8 +467,39 @@ func indexTemplateFile(ix docSink, file, p string) error {
 		cpeTags = []string{t.Vendor + ":" + t.Product}
 	}
 	meta := templateMeta{TemplateID: t.ID, Severity: t.Severity, Tags: t.Tags, CWEs: t.CWEs}
-	_, err := ix.addDocument("template", t.ID, p, title, t.CVEs, cpeTags, meta, body)
+	_, err := ix.addDocument(document{kind: "template", extID: t.ID, sourcePath: p, title: title, cveIDs: t.CVEs, cpeTags: cpeTags, techniqueIDs: t.TechniqueIDs, meta: meta})
 	return err
+}
+
+// indexAttackFile streams one STIX bundle into the index: one document per
+// technique, with its ATT&CK id as ext_id, the name as title, the description
+// plus detection guidance as the searchable body, and its tactics / platforms /
+// data sources in meta. domain names the matrix (enterprise / ics / mobile).
+func indexAttackFile(ix docSink, file, domain string) (int, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	n := 0
+	err = ParseAttack(f, domain, func(t Technique) error {
+		body := t.Description
+		if t.Detection != "" {
+			body += "\n\nDetection: " + t.Detection
+		}
+		meta := techniqueMeta{Tactics: t.Tactics, Platforms: t.Platforms, DataSources: t.DataSources, Domain: t.Domain, Parent: t.Parent}
+		// A sub-technique tags its parent, so a lookup of the parent reaches it.
+		tech := []string{t.ID}
+		if t.Parent != "" {
+			tech = append(tech, t.Parent)
+		}
+		_, err := ix.addDocument(document{kind: "technique", extID: t.ID, title: t.Name, techniqueIDs: tech, meta: meta, body: body})
+		if err == nil {
+			n++
+		}
+		return err
+	})
+	return n, err
 }
 
 // docTitle derives a document title: the first markdown '# ' heading in body,

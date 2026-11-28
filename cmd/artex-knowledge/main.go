@@ -12,7 +12,7 @@
 //
 //	artex-knowledge build -key key.key -key-id artex-knowledge-1 \
 //	    -pack-id artex-core -version 2026.11.27 -out pack.tar.gz \
-//	    [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR -templates-version TAG] \
+//	    [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR -templates-version TAG] [-attack DIR -attack-version TAG] \
 //	    [-embed-model M -embed-endpoint URL [-embed-provider ollama|openai] [-chunk-bytes N]] \
 //	    [-base PREVIOUS-FULL.tar.gz [-delta-out DELTA.tar.gz]]
 //	    Assemble the given sources into a signed pack. Each source flag points at
@@ -69,7 +69,7 @@ func usage() {
 
   artex-knowledge keygen [-out key]
   artex-knowledge build -key key.key -key-id ID -pack-id ID -version V -out pack.tar.gz \
-      [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR -templates-version TAG] \
+      [-exploitdb DIR] [-nvd DIR] [-docs DIR] [-templates DIR -templates-version TAG] [-attack DIR -attack-version TAG] \
       [-embed-model M -embed-endpoint URL [-embed-provider ollama|openai] [-chunk-bytes N]] \
       [-base PREVIOUS-FULL.tar.gz [-delta-out DELTA.tar.gz]]
 `)
@@ -111,6 +111,8 @@ func build(args []string) error {
 	docs := fs.String("docs", "", "dir of technique docs (markdown)")
 	templates := fs.String("templates", "", "nuclei-templates checkout (its layout is kept, as in the image)")
 	templatesVersion := fs.String("templates-version", "", "release tag of the -templates checkout (e.g. v10.5.1); the importer compares it with the image's")
+	attack := fs.String("attack", "", "dir of MITRE ATT&CK STIX bundles (enterprise-attack.json, ics-attack.json, mobile-attack.json)")
+	attackVersion := fs.String("attack-version", "", "ATT&CK release recorded in the manifest (e.g. v16.1)")
 	base := fs.String("base", "", "previous FULL pack of the same id: reuse its vectors, and with -delta-out build a delta against it")
 	deltaOut := fs.String("delta-out", "", "also write a delta pack against -base to this path")
 	embedModel := fs.String("embed-model", "", "embedding model to precompute chunk vectors with (e.g. nomic-embed-text); empty = no vectors")
@@ -162,11 +164,14 @@ func build(args []string) error {
 	if *templates != "" && *templatesVersion == "" {
 		fmt.Println("  note: -templates-version is not set; the importer will warn that the templates version is unknown")
 	}
+	if err := add("attack", *attack, hasExt(".json"), knowledge.Source{Name: "mitre-attack", Version: *attackVersion, License: "Apache-2.0 / MITRE ATT&CK terms"}); err != nil {
+		return err
+	}
 	if err := add("templates", *templates, hasExt(".yaml", ".yml"), knowledge.Source{Name: "nuclei-templates", Version: *templatesVersion, License: "MIT"}); err != nil {
 		return err
 	}
 	if len(in.Files) == 0 {
-		return fmt.Errorf("no source files found; pass at least one of -exploitdb/-nvd/-docs/-templates")
+		return fmt.Errorf("no source files found; pass at least one of -exploitdb/-nvd/-docs/-templates/-attack")
 	}
 
 	// The previous full pack, when given, must be ours: the delta and the reused

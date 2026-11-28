@@ -33,7 +33,7 @@ var noTargetTools = toolSet(
 	"list_tools",
 	// knowledge search: inputs are a query / CVE id / product / ref, not a network
 	// target. copy_knowledge_file copies a local pack file into the run directory.
-	"search_exploits", "lookup_cve", "lookup_software", "search_technique",
+	"search_exploits", "lookup_cve", "lookup_technique", "lookup_software", "search_technique",
 	"read_knowledge", "copy_knowledge_file",
 	// cross-task orchestration, findings and retests (server)
 	"list_tasks", "list_llm_profiles", "spawn_task", "pause_task", "get_task_graph",

@@ -34,7 +34,7 @@ var toolRAGCore = map[string]bool{
 	"list_tools": true,
 	// knowledge search: never project these away; they are the offline substitute
 	// for web search (docs/offline-knowledge-search.md §4.3).
-	"search_exploits": true, "lookup_cve": true, "lookup_software": true,
+	"search_exploits": true, "lookup_cve": true, "lookup_technique": true, "lookup_software": true,
 	"search_technique": true, "read_knowledge": true, "copy_knowledge_file": true,
 }
 

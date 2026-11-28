@@ -176,8 +176,8 @@ type chunkCollector struct {
 	fn       func(text string) error
 }
 
-func (c *chunkCollector) addDocument(_, _, _, title string, _, _ []string, _ any, body string) (int64, error) {
-	for _, ch := range documentChunks(title, body, c.maxBytes) {
+func (c *chunkCollector) addDocument(d document) (int64, error) {
+	for _, ch := range documentChunks(d.title, d.body, c.maxBytes) {
 		if err := c.fn(ch.Text); err != nil {
 			return 0, err
 		}

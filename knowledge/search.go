@@ -67,14 +67,15 @@ type TemplateRef struct {
 
 // CVEInfo is the lookup_cve result.
 type CVEInfo struct {
-	ID          string        `json:"id"`
-	Description string        `json:"description"`
-	CVSS        *CVSS         `json:"cvss,omitempty"`
-	CWEs        []string      `json:"cwes,omitempty"`
-	References  []string      `json:"references,omitempty"`
-	Exploits    []ExploitRef  `json:"exploits,omitempty"`
-	Templates   []TemplateRef `json:"templates,omitempty"`
-	Source      string        `json:"source"`
+	ID          string         `json:"id"`
+	Description string         `json:"description"`
+	CVSS        *CVSS          `json:"cvss,omitempty"`
+	CWEs        []string       `json:"cwes,omitempty"`
+	References  []string       `json:"references,omitempty"`
+	Exploits    []ExploitRef   `json:"exploits,omitempty"`
+	Templates   []TemplateRef  `json:"templates,omitempty"`
+	Techniques  []TechniqueTag `json:"techniques,omitempty"` // ATT&CK ids its templates map to
+	Source      string         `json:"source"`
 }
 
 // ExploitRef links a CVE to an exploit that references it.
@@ -82,6 +83,37 @@ type ExploitRef struct {
 	EDBID string `json:"edb_id"`
 	Title string `json:"title"`
 	Path  string `json:"path,omitempty"`
+}
+
+// TechniqueInfo is the lookup_technique result: one ATT&CK technique and the
+// local documents tagged with it.
+type TechniqueInfo struct {
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description"`
+	Tactics     []string     `json:"tactics,omitempty"`
+	Platforms   []string     `json:"platforms,omitempty"`
+	DataSources []string     `json:"data_sources,omitempty"`
+	Domain      string       `json:"domain,omitempty"`
+	Parent      string       `json:"parent,omitempty"` // for a sub-technique
+	Related     []TechDocRef `json:"related,omitempty"`
+	Source      string       `json:"source"`
+}
+
+// TechDocRef is a document (exploit, template, CVE) tagged with a technique.
+type TechDocRef struct {
+	Kind      string `json:"kind"`
+	Ref       string `json:"ref"` // ext_id or source path, for read_knowledge / copy
+	Title     string `json:"title,omitempty"`
+	Path      string `json:"path,omitempty"`
+	LocalPath string `json:"local_path,omitempty"` // a template's local file, if present
+}
+
+// TechniqueTag names a technique on a lookup_cve / template result, so the model
+// can pivot to lookup_technique.
+type TechniqueTag struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 // SoftwareHit is one lookup_software result: a CVE whose CPE applicability
@@ -281,7 +313,7 @@ LIMIT 50`, cve)
 // cveTemplates adds the nuclei templates whose classification names the CVE.
 func (s *Store) cveTemplates(ctx context.Context, info *CVEInfo) error {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT d.ext_id, d.title, d.source_path, d.meta
+SELECT d.ext_id, d.title, d.source_path, d.meta, d.technique_ids
 FROM kb_documents d
 JOIN kb_packs p ON p.id = d.pack_id AND p.active
 WHERE d.kind='template' AND $1 = ANY(d.cve_ids)
@@ -291,10 +323,12 @@ LIMIT 20`, info.ID)
 		return err
 	}
 	defer rows.Close()
+	var techIDs []string
 	for rows.Next() {
 		var id, t, sp sql.NullString
 		var metaRaw []byte
-		if err := rows.Scan(&id, &t, &sp, &metaRaw); err != nil {
+		var tech sql.NullString
+		if err := rows.Scan(&id, &t, &sp, &metaRaw, &tech); err != nil {
 			return err
 		}
 		var tm templateMeta
@@ -303,6 +337,116 @@ LIMIT 20`, info.ID)
 			ID: id.String, Name: t.String, Severity: tm.Severity, Path: sp.String,
 			LocalPath: s.localTemplatePath(sp.String),
 		})
+		techIDs = append(techIDs, parsePGTextArray(tech.String)...)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	info.Techniques, err = s.techniqueTags(ctx, dedupe(techIDs))
+	return err
+}
+
+// techniqueTags resolves ATT&CK ids to {id, name}, keeping the given order and
+// naming a technique from the active pack when it is indexed.
+func (s *Store) techniqueTags(ctx context.Context, ids []string) ([]TechniqueTag, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT upper(d.ext_id), d.title
+FROM kb_documents d
+JOIN kb_packs p ON p.id = d.pack_id AND p.active
+WHERE d.kind='technique' AND upper(d.ext_id) = ANY($1::text[])`, pgTextArray(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	name := map[string]string{}
+	for rows.Next() {
+		var id, t string
+		if err := rows.Scan(&id, &t); err != nil {
+			return nil, err
+		}
+		name[id] = t
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]TechniqueTag, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, TechniqueTag{ID: id, Name: name[strings.ToUpper(id)]})
+	}
+	return out, nil
+}
+
+// LookupTechnique resolves an ATT&CK id (or a normalisable token) to the
+// technique's record and the local documents tagged with it. ok is false when
+// the active pack does not have the technique and nothing is tagged with it.
+func (s *Store) LookupTechnique(ctx context.Context, id string) (TechniqueInfo, bool, error) {
+	norm, valid := NormalizeTechniqueID(id)
+	if !valid {
+		return TechniqueInfo{}, false, fmt.Errorf("%q is not an ATT&CK technique id (e.g. T1190 or T1059.001)", id)
+	}
+	info := TechniqueInfo{ID: norm}
+	found := false
+	var packID string
+	var title sql.NullString
+	var metaRaw, body []byte
+	err := s.db.QueryRowContext(ctx, `
+SELECT p.pack_id, d.title, d.meta, coalesce((SELECT c.body FROM kb_chunks c WHERE c.document_id=d.id ORDER BY c.chunk_index LIMIT 1), '')
+FROM kb_documents d
+JOIN kb_packs p ON p.id = d.pack_id AND p.active
+WHERE d.kind='technique' AND upper(d.ext_id)=$1
+LIMIT 1`, norm).Scan(&packID, &title, &metaRaw, &body)
+	switch {
+	case err == sql.ErrNoRows:
+	case err != nil:
+		return TechniqueInfo{}, false, err
+	default:
+		found = true
+		var tm techniqueMeta
+		_ = json.Unmarshal(metaRaw, &tm)
+		info.Name, info.Description = title.String, string(body)
+		info.Tactics, info.Platforms, info.DataSources = tm.Tactics, tm.Platforms, tm.DataSources
+		info.Domain, info.Parent = tm.Domain, tm.Parent
+		info.Source = source(packID, "attack/"+norm, 0)
+	}
+	if err := s.techniqueRelated(ctx, &info); err != nil {
+		return info, found, err
+	}
+	return info, found || len(info.Related) > 0, nil
+}
+
+// techniqueRelated adds the exploits, templates and CVEs tagged with the
+// technique (technique_ids), newest-looking first by kind then ref.
+func (s *Store) techniqueRelated(ctx context.Context, info *TechniqueInfo) error {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT d.kind, d.ext_id, d.source_path, d.title, d.meta
+FROM kb_documents d
+JOIN kb_packs p ON p.id = d.pack_id AND p.active
+WHERE d.kind <> 'technique' AND $1 = ANY(d.technique_ids)
+ORDER BY d.kind, d.ext_id, d.source_path
+LIMIT 50`, info.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind string
+		var extID, sp, t sql.NullString
+		var metaRaw []byte
+		if err := rows.Scan(&kind, &extID, &sp, &t, &metaRaw); err != nil {
+			return err
+		}
+		ref := extID.String
+		if ref == "" {
+			ref = sp.String
+		}
+		r := TechDocRef{Kind: kind, Ref: ref, Title: t.String, Path: sp.String}
+		if kind == "template" {
+			r.LocalPath = s.localTemplatePath(sp.String)
+		}
+		info.Related = append(info.Related, r)
 	}
 	return rows.Err()
 }

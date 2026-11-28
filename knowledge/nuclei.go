@@ -18,16 +18,17 @@ const templatesPrefix = "templates/"
 
 // NucleiTemplate is the part of a nuclei template the index uses.
 type NucleiTemplate struct {
-	ID          string
-	Name        string
-	Severity    string
-	Description string
-	Tags        []string
-	Authors     []string
-	CVEs        []string // upper-case CVE ids from classification.cve-id
-	CWEs        []string
-	Vendor      string // metadata.vendor, when the template names one
-	Product     string // metadata.product
+	ID           string
+	Name         string
+	Severity     string
+	Description  string
+	Tags         []string
+	Authors      []string
+	CVEs         []string // upper-case CVE ids from classification.cve-id
+	CWEs         []string
+	TechniqueIDs []string // ATT&CK technique ids (T####[.###]) from the tags
+	Vendor       string   // metadata.vendor, when the template names one
+	Product      string   // metadata.product
 }
 
 // nucleiDoc mirrors the template fields read; everything else is ignored.
@@ -102,7 +103,14 @@ func ParseNucleiTemplate(data []byte) (NucleiTemplate, bool) {
 			t.CWEs = append(t.CWEs, c)
 		}
 	}
-	t.CVEs, t.CWEs = dedupe(t.CVEs), dedupe(t.CWEs)
+	// ATT&CK technique ids sometimes ride in the tags, bare (t1190) or dotted
+	// (attack.t1190); normalise each to its id (T1190, T1190.001).
+	for _, tag := range d.Info.Tags {
+		if id, ok := NormalizeTechniqueID(tag); ok {
+			t.TechniqueIDs = append(t.TechniqueIDs, id)
+		}
+	}
+	t.CVEs, t.CWEs, t.TechniqueIDs = dedupe(t.CVEs), dedupe(t.CWEs), dedupe(t.TechniqueIDs)
 	// metadata is a free-form map; only vendor/product are read.
 	if d.Info.Metadata.Kind == yaml.MappingNode {
 		c := d.Info.Metadata.Content

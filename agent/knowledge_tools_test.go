@@ -19,6 +19,8 @@ type fakeKnowledge struct {
 	technique []knowledge.TechniqueHit
 	cve       knowledge.CVEInfo
 	cveOK     bool
+	technfo   knowledge.TechniqueInfo
+	technfoOK bool
 	software  []knowledge.SoftwareHit
 	chunk     knowledge.KnowledgeChunk
 	chunkOK   bool
@@ -38,6 +40,10 @@ func (f *fakeKnowledge) SearchTechnique(_ context.Context, q string, _ int) ([]k
 }
 func (f *fakeKnowledge) LookupCVE(_ context.Context, cve string) (knowledge.CVEInfo, bool, error) {
 	return f.cve, f.cveOK, nil
+}
+func (f *fakeKnowledge) LookupTechnique(_ context.Context, id string) (knowledge.TechniqueInfo, bool, error) {
+	f.lastQuery = id
+	return f.technfo, f.technfoOK, nil
 }
 func (f *fakeKnowledge) LookupSoftware(_ context.Context, p, v, ver string, _ int) ([]knowledge.SoftwareHit, error) {
 	return f.software, nil

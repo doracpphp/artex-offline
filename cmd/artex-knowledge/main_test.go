@@ -118,3 +118,37 @@ func TestBuildWritesDeltaAgainstBase(t *testing.T) {
 		t.Error("a base pack signed by another key must be refused")
 	}
 }
+
+// build -attack packs the STIX bundles under attack/ and records the ATT&CK
+// source version.
+func TestBuildPacksAttack(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "k")
+	if err := keygen([]string{"-out", key}); err != nil {
+		t.Fatal(err)
+	}
+	ad := filepath.Join(dir, "attack")
+	os.MkdirAll(ad, 0o755)
+	os.WriteFile(filepath.Join(ad, "enterprise-attack.json"), []byte(`{"type":"bundle","objects":[]}`), 0o644)
+	out := filepath.Join(dir, "p.tar.gz")
+	if err := build([]string{"-key", key + ".key", "-key-id", "k1", "-pack-id", "artex-core",
+		"-version", "1", "-out", out, "-attack", ad, "-attack-version", "v16.1"}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := knowledge.PackManifest(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Files) != 1 || m.Files[0].Path != "attack/enterprise-attack.json" {
+		t.Fatalf("attack file: %+v", m.Files)
+	}
+	var ok bool
+	for _, src := range m.Sources {
+		if src.Name == "mitre-attack" && src.Version == "v16.1" {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Errorf("attack source version not recorded: %+v", m.Sources)
+	}
+}

@@ -561,7 +561,8 @@ go run ./cmd/artex-knowledge keygen -out signing
 go run ./cmd/artex-knowledge build -key signing.key -key-id artex-kb-1 \
     -pack-id artex-core -version "$(date +%Y.%m.%d)" -out pack.tar.gz \
     -exploitdb ./exploitdb -nvd ./nvd-2.0 -docs ./techniques \
-    -templates ./nuclei-templates -templates-version v10.5.1
+    -templates ./nuclei-templates -templates-version v10.5.1 \
+    -attack ./attack-stix -attack-version v16.1
 # Optional: precompute the vectors online (the offline side then needs no embedding run
 # when it uses the same model and chunk size), and ship monthly updates as deltas:
 #   -embed-model nomic-embed-text -embed-endpoint http://127.0.0.1:11434

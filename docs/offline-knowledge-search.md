@@ -62,7 +62,7 @@ mirrors.
 | B. Technique documentation search | Full-text/vector search over PayloadsAllTheThings, HackTricks, WSTG, etc. | **Adopted** | Free-form technique knowledge can only be supplied through search |
 | C. NVD/CPE/CWE structured mirror | Store NVD 2.0 snapshots (CVE, CPE, match criteria) locally | **Adopted (recommended)** | Resolves "fingerprint → CVE → EDB" with deterministic joins rather than fuzzy LLM search |
 | D. nuclei-templates / MSF metadata | Make template YAML and module info searchable | **Adopted (recommended)** | Search results lead directly to executable artifacts |
-| E. MITRE ATT&CK STIX | Technique lookup from Enterprise/ICS STIX bundles | Optional (later phase) | Useful for normalizing technique tags, but moderate initial value |
+| E. MITRE ATT&CK STIX | Technique lookup from Enterprise/ICS/Mobile STIX bundles | **Adopted (Phase 4)** | Normalizes technique tags and pivots findings to local exploits/templates |
 | F. Progressive skill disclosure | Existing `skills/` index → body read | Adopted (reuses existing mechanism) | No RAG cost; matches the existing SKILL.md conventions |
 | G. Hybrid search engine | Postgres full-text search (`tsvector`) + `pg_trgm` + pgvector (embedding) | **Adopted** | Postgres is an existing dependency. Degrades to lexical search alone when pgvector is unavailable |
 | H. Knowledge pack distribution | Offline updates via signed archives | **Adopted** | Without an offline update path, the corpus goes stale |
@@ -93,9 +93,10 @@ Online environment                            Offline environment
 │  ├ nvd (2.0 snapshot)    │ ── USB/scp ──▶   │   ├ Postgres FTS/trigram (+pgvector)   │
 │  ├ PayloadsAllTheThings  │                  │   └ data/knowledge/packs/<id>/<ver>/   │
 │  ├ HackTricks, WSTG      │                  │  agent tools:                          │
-│  └ nuclei-templates      │                  │   search_exploits / lookup_cve         │
-└──────────────────────────┘                  │   lookup_software / search_technique   │
-                                              │   read_knowledge / copy_knowledge_file │
+│  ├ nuclei-templates      │                  │   search_exploits / lookup_cve         │
+│  └ ATT&CK STIX           │                  │   lookup_technique / lookup_software   │
+└──────────────────────────┘                  │   search_technique / read_knowledge    │
+                                              │   copy_knowledge_file                  │
                                               │  egress gates = defense in depth (4.5) │
                                               └────────────────────────────────────────┘
 ```
@@ -114,6 +115,7 @@ exploitdb/             # files_exploits.csv + exploits directory (actual files)
 nvd/                   # NVD 2.0 API snapshot (CVE, CPE, match criteria)
 docs/                  # technique documents (PayloadsAllTheThings, HackTricks, WSTG …)
 templates/             # nuclei-templates, in the repository's (and the image's) layout
+attack/                # MITRE ATT&CK STIX 2.1 bundles (enterprise / ics / mobile)
 embeddings/            # optional: precomputed chunk vectors, <model>-<version>.akv
 ```
 
@@ -185,13 +187,14 @@ CWE names (the CWE dictionary) are not shipped yet: `lookup_cve` returns CWE ids
 | --- | --- |
 | `kb_packs` | Pack management (pack id, version, key id and fingerprint, manifest hash, files directory, import timestamp, active flag) |
 | `kb_key_pins` | The signing key each pack id is pinned to (TOFU; §4.1) |
-| `kb_documents` | One row per CVE, exploit, doc or template in a pack (pack row, kind `cve` / `exploit` / `doc` / `template`, ext_id such as the CVE id or EDB-ID, source_path, title, cve_ids, cpe_tags, and a `meta` jsonb with the structured fields: CVSS, CWE and references for a CVE; type, platform, date, port, author and verified for an exploit) |
+| `kb_documents` | One row per CVE, exploit, doc, template or ATT&CK technique in a pack (pack row, kind `cve` / `exploit` / `doc` / `template` / `technique`, ext_id such as the CVE id, EDB-ID or technique id, source_path, title, cve_ids, cpe_tags, technique_ids, and a `meta` jsonb with the structured fields: CVSS/CWE/references for a CVE; type/platform/date/port/author/verified for an exploit; tactics/platforms/data_sources for a technique) |
 | `kb_chunks` | Body chunks + a generated `tsvector` column (GIN index); a trigram index for the substring fallback is created at runtime when `pg_trgm` is available |
 | `kb_cpe_matches` | One row per CVE applicability criterion (vendor, product, CPE criteria, vulnerable flag, version-range bounds) for `lookup_software` |
 | `kb_embeddings` | Chunk embeddings (chunk_id, model, `vector(N)`); **created at runtime** only when pgvector is available (see below). The dimension N is the column's, fixed per table |
 
-Technique tags (`technique_ids`, e.g. ATT&CK ids) are not stored yet; they arrive with the
-ATT&CK option (E) in Phase 4.
+`technique_ids` (added in migration 0016) lists the ATT&CK technique ids a cve / exploit /
+doc / template relates to, the way `cve_ids` links documents to CVEs; a GIN index backs the
+join from a technique to the documents tagged with it.
 
 > **Premise**: `db/` makes no use of full-text search today, so the FTS foundation is
 > **entirely new**. Postgres itself is already a dependency. The schema goes into a numbered
@@ -269,9 +272,10 @@ ATT&CK option (E) in Phase 4.
 | Tool | Input | Behavior |
 | --- | --- | --- |
 | `search_exploits` | Query, optional exploit type and platform | Hybrid search over the ExploitDB entries (CSV metadata + exploit file bodies). Returns EDB-ID, title, type, platform, date, verified flag, CVEs, path (when the pack carries the file), a snippet and the source |
-| `lookup_cve` | CVE ID | Returns the description, CVSS, CWEs and references from the NVD mirror, the ExploitDB entries that reference the CVE, and the nuclei templates whose classification names it (id, name, severity, pack path, and `local_path` when this installation has the file, to run with `nuclei -t`). A CVE known only from an exploit or a template is still returned. Affected products are not listed (use `lookup_software` in the other direction) |
+| `lookup_cve` | CVE ID | Returns the description, CVSS, CWEs and references from the NVD mirror, the ExploitDB entries that reference the CVE, the nuclei templates whose classification names it (id, name, severity, pack path, and `local_path` when this installation has the file, to run with `nuclei -t`), and the ATT&CK techniques its templates map to (id + name; follow with `lookup_technique`). A CVE known only from an exploit or a template is still returned. Affected products are not listed (use `lookup_software` in the other direction) |
 | `lookup_software` | Product name, optional vendor and version | Folds the product to CPE form (lower case, spaces to underscores), prefers CVEs whose CPE product matches exactly and falls back to a literal substring match only when there is none, evaluates the NVD version ranges in Go, and returns one hit per CVE with the matched CPE, vendor, product, `match_basis` (`exact` / `partial`) and whether a version was checked — not a numeric confidence |
 | `search_technique` | Query (technique, payload, WAF evasion, etc.) | Hybrid search over the pack's `docs/` and `templates/` files. Returns kind (`doc` / `template`), title, path, chunk number, a snippet and the source; a nuclei template hit adds its template id, severity and `local_path` |
+| `lookup_technique` | ATT&CK technique id (T1190, T1059.001; a token like `attack.t1190` is normalised) | Returns the technique's name, tactics, platforms, data sources and description from the local ATT&CK mirror, plus the exploits, nuclei templates and CVEs tagged with it (a template with `local_path` when the installation has the file). A technique known only from a tag (no ATT&CK bundle imported) still returns its related documents |
 | `read_knowledge` | document id (EDB-ID, CVE id) or source path, plus a 1-based chunk number | Returns the full text of one chunk (capped at `ARTEX_KNOWLEDGE_MAX_CHUNK_BYTES`) and the document's chunk count; read further chunks with further calls. Progressive disclosure: search → read |
 | `copy_knowledge_file` | document id / source path, optional destination name | Copies the file (an exploit source, a doc or a template) into the run's working directory so that Bash and the file tools can use it; regular files up to 32 MiB |
 
@@ -403,7 +407,7 @@ compose service such as `http://ollama:11434` counts as local.
 | CWE | XML | CWE names for `lookup_cve` | Twice a year |
 | PayloadsAllTheThings / HackTricks / WSTG | Markdown | Technique search | Quarterly |
 | nuclei-templates | YAML | Template suggestions, signature-match hints | Monthly, aligned with the image (see below) |
-| MITRE ATT&CK STIX | STIX 2.1 | Technique normalization (later phase) | Twice a year |
+| MITRE ATT&CK STIX | STIX 2.1 | Technique normalization (`lookup_technique`, technique tags) | Twice a year |
 
 - **NVD source caveat**: The legacy NVD data feeds (`nvdcve-1.1-YYYY.json.gz`) were
   **retired** in December 2023. Pack builds use **NVD 2.0 API snapshots** (the CVE, CPE and
@@ -583,7 +587,28 @@ Phase plan:
 3. **Phase 3 (done)**: nuclei-templates (option D) with version alignment against the image;
    delta packs; precomputed in-pack embeddings, plus vector reuse across updates. MSF module
    metadata (the other half of option D) is not included.
-4. **Phase 4**: ATT&CK STIX (option E), EPSS/KEV snapshots, and integrated tags with skills.
+4. **Phase 4 (in progress)**: ATT&CK STIX (option E) **done**; EPSS/KEV snapshots and skill
+   tags remain.
+
+**Phase 4 status (2026-11-28)**: ATT&CK is implemented.
+
+- **STIX parser** (`knowledge/attack.go`): `attack/*.json` bundles (enterprise / ics /
+  mobile) are parsed into `technique` documents — id (T####, T####.###), name, tactics,
+  platforms, data sources, detection; revoked and deprecated techniques are skipped, and a
+  sub-technique tags its parent so a lookup of the parent reaches it.
+- **Technique tags** (migration `0016_knowledge_attack.sql`): `technique_ids` on every
+  document; nuclei templates contribute ATT&CK ids found in their tags
+  (`NormalizeTechniqueID` accepts `T1190`, `t1190`, `attack.t1059.001`).
+- **`lookup_technique`** (`knowledge/search.go`, `agent/knowledge_tools.go`): resolves a
+  technique and returns the local documents tagged with it; `lookup_cve` surfaces the
+  techniques its templates map to.
+- **Builder**: `build -attack DIR -attack-version TAG`.
+- **Verified**: unit tests for the STIX parser, id normalisation and template tag extraction;
+  Postgres integration tests (`postgres:16-alpine`, `pgvector/pgvector:pg16`) for technique
+  import, `lookup_technique` and the CVE↔technique links; a CLI test for `-attack`; the
+  0016 migration is covered by the migrate test and verified to apply on top of 0015.
+- **Not yet**: EPSS/KEV snapshots and skill-to-technique tags (the rest of Phase 4), and the
+  CWE dictionary (`lookup_cve` returns CWE ids only).
 
 **Review follow-up (2026-11-27)**: a code, security and design review of the first
 implementation led to these changes, each covered by tests (the Postgres ones against

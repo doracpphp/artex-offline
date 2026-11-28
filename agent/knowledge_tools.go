@@ -29,6 +29,7 @@ type KnowledgeStore interface {
 	SearchExploits(ctx context.Context, query, typ, platform string, limit int) ([]knowledge.ExploitHit, error)
 	SearchTechnique(ctx context.Context, query string, limit int) ([]knowledge.TechniqueHit, error)
 	LookupCVE(ctx context.Context, cve string) (knowledge.CVEInfo, bool, error)
+	LookupTechnique(ctx context.Context, id string) (knowledge.TechniqueInfo, bool, error)
 	LookupSoftware(ctx context.Context, product, vendor, version string, limit int) ([]knowledge.SoftwareHit, error)
 	ReadKnowledge(ctx context.Context, ref string, chunk int) (knowledge.KnowledgeChunk, bool, error)
 	ReadDocumentFile(ctx context.Context, ref string, maxBytes int64) (data []byte, packID, sourcePath string, ok bool, err error)
@@ -41,7 +42,7 @@ func (t *ToolSet) SetKnowledge(k KnowledgeStore) { t.knowledge = k }
 // KnowledgeToolNames are the knowledge-search tools, so the server can drop them
 // from an agent's catalog when no pack is active (ToolResolve).
 var KnowledgeToolNames = []string{
-	"search_exploits", "lookup_cve", "lookup_software", "search_technique",
+	"search_exploits", "lookup_cve", "lookup_technique", "lookup_software", "search_technique",
 	"read_knowledge", "copy_knowledge_file",
 }
 
@@ -87,7 +88,7 @@ func (t *ToolSet) ApplyKnowledge() {
 // worker-only (it needs the run's shell/file tools) and is added in WorkerTools.
 func (t *ToolSet) knowledgeQueryTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		t.searchExploits(), t.lookupCVE(), t.lookupSoftware(), t.searchTechnique(), t.readKnowledge(),
+		t.searchExploits(), t.lookupCVE(), t.lookupTechnique(), t.lookupSoftware(), t.searchTechnique(), t.readKnowledge(),
 	}
 }
 
@@ -158,8 +159,8 @@ func (t *ToolSet) lookupCVE() actool.CoreTool {
 	return readTool(
 		"lookup_cve",
 		"Look up a CVE in the local NVD mirror: description, CVSS score, CWE, references, the ExploitDB entries that reference it, "+
-			"and the nuclei templates that detect it (with local_path when this installation has the template, to run it with nuclei -t). "+
-			"Offline substitute for searching the web for a CVE.",
+			"the nuclei templates that detect it (with local_path when this installation has the template, to run it with nuclei -t), "+
+			"and any ATT&CK techniques its templates map to (use lookup_technique for those). Offline substitute for searching the web for a CVE.",
 		obj(map[string]any{
 			"cve": str("a CVE id, e.g. CVE-2021-41773"),
 		}, "cve"),
@@ -177,6 +178,33 @@ func (t *ToolSet) lookupCVE() actool.CoreTool {
 				return jsonResult(map[string]any{"found": false, "cve": strings.ToUpper(strings.TrimSpace(a.CVE))})
 			}
 			return jsonResult(map[string]any{"found": true, "cve": info})
+		},
+	)
+}
+
+func (t *ToolSet) lookupTechnique() actool.CoreTool {
+	return readTool(
+		"lookup_technique",
+		"Look up a MITRE ATT&CK technique in the local knowledge base by its id (T1190, T1059.001): its name, tactics, "+
+			"platforms, data sources and description, plus the local exploits, nuclei templates and CVEs tagged with it "+
+			"(a template carries local_path when this installation has the file). Offline substitute for the ATT&CK website.",
+		obj(map[string]any{
+			"id": str("an ATT&CK technique id, e.g. T1190 or T1059.001"),
+		}, "id"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.knowledge == nil {
+				return t.knowledgeUnavailable(), nil
+			}
+			var a struct{ ID string }
+			_ = json.Unmarshal(in, &a)
+			info, ok, err := t.knowledge.LookupTechnique(ctx, a.ID)
+			if err != nil {
+				return actool.Errorf("lookup_technique: " + err.Error()), nil
+			}
+			if !ok {
+				return jsonResult(map[string]any{"found": false, "id": strings.TrimSpace(a.ID)})
+			}
+			return jsonResult(map[string]any{"found": true, "technique": info})
 		},
 	)
 }

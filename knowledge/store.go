@@ -252,25 +252,39 @@ func (s *Store) beginImport(ctx context.Context, vm *VerifiedManifest, m *Manife
 	return &indexer{tx: tx, ctx: ctx, cfg: s.cfg, packPK: pk}, nil
 }
 
-// addDocument inserts one document and its body chunks. bodyText is chunked
-// together with the title so a title-only query still matches a chunk. extID and
-// sourcePath may be empty. It returns the new document id.
-func (ix *indexer) addDocument(kind, extID, sourcePath, title string, cveIDs, cpeTags []string, meta any, bodyText string) (int64, error) {
+// document is one row to index: a CVE, exploit, doc, template or ATT&CK
+// technique. extID, sourcePath and the tag slices may be empty. The body is
+// chunked together with the title so a title-only query still matches a chunk.
+type document struct {
+	kind         string
+	extID        string
+	sourcePath   string
+	title        string
+	cveIDs       []string
+	cpeTags      []string
+	techniqueIDs []string
+	meta         any
+	body         string
+}
+
+// addDocument inserts one document and its body chunks, and returns its id.
+func (ix *indexer) addDocument(d document) (int64, error) {
 	metaJSON := []byte("{}")
-	if meta != nil {
-		if b, err := json.Marshal(meta); err == nil {
+	if d.meta != nil {
+		if b, err := json.Marshal(d.meta); err == nil {
 			metaJSON = sanitizeJSON(b)
 		}
 	}
 	// Pack data is signed, not clean: make every value storable (import.go).
-	extID, sourcePath, title, bodyText = sanitizeText(extID), sanitizeText(sourcePath), sanitizeText(title), sanitizeText(bodyText)
-	cveIDs, cpeTags = sanitizeAll(cveIDs), sanitizeAll(cpeTags)
+	extID, sourcePath := sanitizeText(d.extID), sanitizeText(d.sourcePath)
+	title, bodyText := sanitizeText(d.title), sanitizeText(d.body)
+	cveIDs, cpeTags, techIDs := sanitizeAll(d.cveIDs), sanitizeAll(d.cpeTags), sanitizeAll(d.techniqueIDs)
 	var docID int64
 	err := ix.tx.QueryRowContext(ix.ctx,
-		`INSERT INTO kb_documents(pack_id, kind, ext_id, source_path, title, cve_ids, cpe_tags, meta)
-		 VALUES ($1,$2,$3,$4,$5,$6::text[],$7::text[],$8) RETURNING id`,
-		ix.packPK, kind, nullIf(extID), nullIf(sourcePath), title,
-		pgTextArray(cveIDs), pgTextArray(cpeTags), metaJSON).Scan(&docID)
+		`INSERT INTO kb_documents(pack_id, kind, ext_id, source_path, title, cve_ids, cpe_tags, technique_ids, meta)
+		 VALUES ($1,$2,$3,$4,$5,$6::text[],$7::text[],$8::text[],$9) RETURNING id`,
+		ix.packPK, d.kind, nullIf(extID), nullIf(sourcePath), title,
+		pgTextArray(cveIDs), pgTextArray(cpeTags), pgTextArray(techIDs), metaJSON).Scan(&docID)
 	if err != nil {
 		return 0, fmt.Errorf("insert document: %w", err)
 	}
